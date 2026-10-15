@@ -1,0 +1,7 @@
+PING 192.168.1.250 (192.168.1.250) 56(84) bytes of data.
+From 192.168.1.100 icmp_seq=1 Destination Host Unreachable
+From 192.168.1.100 icmp_seq=2 Destination Host Unreachable
+From 192.168.1.100 icmp_seq=3 Destination Host Unreachable
+
+--- 192.168.1.250 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2036ms

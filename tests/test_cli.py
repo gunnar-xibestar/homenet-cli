@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import tomllib
 
 from homenet.cli import BANNER, main
 from homenet.core import checks
@@ -50,6 +49,25 @@ EXAMPLES = {
     "doctor": "homenet doctor",
 }
 
+# Wording from homenet.core.checks.check_privileges (cap_net_raw+eip, no $(which)).
+PRIVILEGE_HINT = (
+    "Easiest: re-run with sudo, e.g. `sudo homenet scan`. "
+    "Advanced alternative: `sudo setcap cap_net_raw+eip /usr/bin/nmap` (use the path "
+    "from `command -v nmap`) and run nmap with --privileged. Be careful: this lets "
+    "every user on this computer send raw network packets through nmap, not just you."
+)
+
+
+def _load_toml(text: str) -> dict:
+    """tomllib is stdlib on 3.11+; Python 3.10 uses the tomli dependency."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+
+    return tomllib.loads(text)
+
+
 WHAT_IT_DOES = {
     "whoami-net": "IP address",
     "devices": "phones",
@@ -65,8 +83,10 @@ WHAT_IT_DOES = {
 
 
 def test_console_script_entry_point():
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    data = _load_toml((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["scripts"]["homenet"] == "homenet.cli:main"
+    dev = data["project"]["optional-dependencies"]["dev"]
+    assert any(item.startswith("tomli") for item in dev)
 
 
 def test_top_level_help_lists_commands_and_banner(capsys):
@@ -95,6 +115,8 @@ def test_command_help_says_what_it_does_and_gives_an_example(command, capsys):
     assert EXAMPLES[command] in out
     if command in SCAN_COMMANDS:
         assert BANNER in out
+    if command == "doctor":
+        assert "ping" in out
 
 
 @pytest.mark.parametrize("command", ("whoami-net", "devices", "router", "baseline", "new-devices"))
@@ -191,7 +213,7 @@ def test_doctor_exits_1_and_shows_fix_hints_when_a_check_fails(capsys, monkeypat
                 "privileges",
                 False,
                 "running as a normal user",
-                "Re-run with sudo, or sudo setcap cap_net_raw+ep $(which nmap)",
+                PRIVILEGE_HINT,
             ),
             CheckResult("network", True, "default route via 192.168.1.1, interface eth0 (up)"),
         ],
@@ -201,7 +223,8 @@ def test_doctor_exits_1_and_shows_fix_hints_when_a_check_fails(capsys, monkeypat
     assert "FAIL  nmap" in out
     assert "PASS  ip" in out
     assert "Fix: sudo apt install nmap" in out
-    assert "setcap cap_net_raw+ep" in out
+    assert "setcap cap_net_raw+eip" in out
+    assert "$(which nmap)" not in out
     assert "2 checks failed." in out
 
 
@@ -215,7 +238,7 @@ def test_doctor_treats_warnings_as_non_fatal(capsys, monkeypatch):
                 "privileges",
                 False,
                 "running as a normal user",
-                "Re-run with sudo, or sudo setcap cap_net_raw+ep $(which nmap)",
+                PRIVILEGE_HINT,
                 "warning",
             ),
             CheckResult("network", True, "default route via eth0", severity="ok"),
@@ -226,7 +249,9 @@ def test_doctor_treats_warnings_as_non_fatal(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "WARN  privileges" in out
     assert "FAIL" not in out
-    assert "Fix: Re-run with sudo" in out
+    assert "setcap cap_net_raw+eip" in out
+    assert "sudo homenet scan" in out
+    assert "$(which nmap)" not in out
     assert "No errors. 1 warning." in out
 
 

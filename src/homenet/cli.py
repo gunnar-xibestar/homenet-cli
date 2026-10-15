@@ -126,7 +126,7 @@ _COMMANDS: tuple[_Command, ...] = (
     _Command(
         "doctor",
         "Check that tools and permissions are ready",
-        "Check that nmap and the ip command are installed, that you are allowed "
+        "Check that nmap, the ip command, and ping are installed, that you are allowed "
         "to scan, and that this computer has a network route. Run this first if a scan fails.",
         "homenet doctor",
     ),
