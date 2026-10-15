@@ -264,6 +264,47 @@ def test_explain(command, extra, params, json_mode, capsys, monkeypatch, no_scan
         assert captured.out == "\n\n".join(blocks) + "\n"
 
 
+@pytest.mark.parametrize(
+    ("argv", "params", "code"),
+    [
+        (["explain", "devices", "--network", NET], {"local_network": NET}, 0),
+        (
+            ["explain", "ports", "192.168.1.1", "--network", NET],
+            {"target": "192.168.1.1", "local_network": NET, "top_ports": 100},
+            0,
+        ),
+        (
+            ["explain", "router", "--network", NET, "--gateway", "192.168.1.1"],
+            {"gateway": "192.168.1.1", "local_network": NET},
+            0,
+        ),
+        (["explain", "devices", "--network", "nope"], None, 1),
+        (["explain", "new-devices", "--network", "fe80::/64"], None, 2),
+    ],
+)
+def test_explain_network_skips_ip_and_rejects_a_bad_cidr(
+    argv, params, code, capsys, monkeypatch, no_scans
+):
+    seen = {}
+
+    def fake(name, **kwargs):
+        seen["name"] = name
+        seen["kwargs"] = kwargs
+        return [EXEC]
+
+    monkeypatch.setattr("homenet.cli.planned_commands", fake)
+    assert main(argv) == code
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    if params is None:
+        assert seen == {}
+        assert "not a valid" in captured.out and _INVALID_HINT in captured.out
+        assert "Fix:" in captured.out and "ValueError" not in captured.out
+        return
+    assert seen == {"name": argv[1], "kwargs": params}
+    assert f"$ {EXEC.display()}" in captured.out
+
+
 def test_explain_cleans_displayed_commands(capsys, monkeypatch, no_scans):
     nasty = Command(("nmap", "-sn", "192.168.1.0/24\x1b[2J"), "find\x1b devices")
     monkeypatch.setattr("homenet.cli.planned_commands", lambda *_a, **_k: [nasty])

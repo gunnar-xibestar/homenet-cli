@@ -27,9 +27,11 @@ and the purpose go through :func:`homenet.output._clean`. With ``--json`` the
 hook does not print; the JSON object gains a top-level ``commands`` list instead.
 
 ``explain`` prints those commands and their purposes without running them.
-It still calls :func:`homenet.core.netinfo.detect` when the command needs the
-home network or gateway, and that may run ``ip``. A planner ``ValueError`` for
-a bad target is shown as the usual invalid-target error, with no traceback.
+``--network`` (and ``--gateway`` for the router) supplies the home network so
+explain does not run ``ip``. Without them, it calls
+:func:`homenet.core.netinfo.detect`, which may run ``ip``. A bad ``--network``
+or a planner ``ValueError`` for a bad target is shown as the usual
+invalid-target error, with no traceback.
 """
 
 from __future__ import annotations
@@ -696,6 +698,44 @@ def _explain_host(args: argparse.Namespace, name: str) -> tuple[str | None, int 
         args.command = saved
 
 
+def _supplied_network(args: argparse.Namespace, code: int) -> tuple[str | None, int | None]:
+    """Return ``(cidr, None)`` or ``(None, exit code)`` after a friendly error.
+
+    ``(None, None)`` means ``--network`` was not passed. A bad CIDR uses the
+    same invalid-target message as a scan that rejects the address.
+    """
+    raw = getattr(args, "network", None)
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    try:
+        network = ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        message, hint = _invalid_target(text or str(raw))
+        return None, _fail_message(args, message, hint, code)
+    if network.version != 4:
+        message, hint = _invalid_target(text)
+        return None, _fail_message(args, message, hint, code)
+    return str(network), None
+
+
+def _supplied_gateway(args: argparse.Namespace, code: int) -> tuple[str | None, int | None]:
+    """Return ``(ip, None)``, ``(None, None)`` if omitted, or ``(None, exit code)``."""
+    raw = getattr(args, "gateway", None)
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        message, hint = _invalid_target(text or str(raw))
+        return None, _fail_message(args, message, hint, code)
+    if address.version != 4:
+        message, hint = _invalid_target(text)
+        return None, _fail_message(args, message, hint, code)
+    return str(address), None
+
+
 def _explain_params(name: str, ip: str | None, network: str | None, gateway: str | None) -> dict:
     if name in _SCAN_COMMANDS:
         return {"local_network": network}
@@ -730,15 +770,27 @@ def _run_explain(args: argparse.Namespace) -> int:
             code=2,
         )
 
+    supplied, err = _supplied_network(args, code)
+    if err is not None:
+        return err
+    supplied_gw, err = _supplied_gateway(args, code)
+    if err is not None:
+        return err
+
     network: str | None = None
     gateway: str | None = None
     if name in _NETWORK_COMMANDS:
-        try:
-            info = netinfo.detect()
-            network = _subnet_from(info)
-        except netinfo.NetInfoError as exc:
-            return _fail(args, exc, code)
-        gateway = (info.gateway or "").strip() or None
+        if supplied is not None:
+            network = supplied
+            gateway = supplied_gw
+        else:
+            try:
+                info = netinfo.detect()
+                network = _subnet_from(info)
+            except netinfo.NetInfoError as exc:
+                return _fail(args, exc, code)
+            detected = (info.gateway or "").strip() or None
+            gateway = supplied_gw if supplied_gw is not None else detected
 
     try:
         planned = planned_commands(name, **_explain_params(name, ip, network, gateway))
@@ -841,9 +893,10 @@ def _add_explain(subparsers, json_mode: bool) -> None:
         help="Show the real commands a command would run, without running them",
         description=(
             "Print each real command homenet would run, and why, without running it.\n"
-            "When the command needs your home network or gateway, explain looks them up\n"
-            "the same way a real run does. That lookup may run the `ip` command.\n"
-            "It is not a scan. If the lookup fails, homenet prints the usual error and fix hint.\n"
+            "Pass --network to give the home network, and --gateway for the router.\n"
+            "That skips the ip lookup. Without them, explain looks the network up the\n"
+            "same way a real run does, which may run the `ip` command. It is not a scan.\n"
+            "If the lookup fails, homenet prints the usual error and fix hint.\n"
             "\n"
             f"command is one of: {names}."
         ),
@@ -862,6 +915,16 @@ def _add_explain(subparsers, json_mode: bool) -> None:
         nargs="?",
         metavar="IP",
         help="IP address, when that command needs one. For example 192.168.1.20",
+    )
+    parser.add_argument(
+        "--network",
+        metavar="CIDR",
+        help="Home network to assume, for example 192.168.1.0/24. Skips the ip lookup.",
+    )
+    parser.add_argument(
+        "--gateway",
+        metavar="IP",
+        help="Router address, for example 192.168.1.1. With --network, skips the ip lookup.",
     )
     parser.add_argument(
         "--json",

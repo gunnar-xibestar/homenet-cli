@@ -127,7 +127,7 @@ Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `
 `homenet --show-cmd devices` still runs the command. Before each underlying command runs, homenet prints it to stderr, shell-quoted, as you would type it:
 
 ```text
-$ nmap -sn 192.168.1.0/24
+$ nmap -sn -T4 -oX - 192.168.1.0/24
 ```
 
 The flag can sit before or after the command name: `homenet devices --show-cmd` is the same. Add `--json` and those `$` lines are left out. The JSON object gains a `commands` list instead. Each item has `argv`, `display`, `purpose`, and `kind` (`exec` or `http`). On failure the error object gains that same list.
@@ -135,11 +135,11 @@ The flag can sit before or after the command name: `homenet devices --show-cmd` 
 `homenet explain devices` prints each command and a one-line purpose, and does not run them:
 
 ```text
-$ nmap -sn 192.168.1.0/24
+$ nmap -sn -T4 -oX - 192.168.1.0/24
   find devices that are up (ping sweep)
 ```
 
-`explain` looks up your home network and gateway the same way a real run does when the command needs them. That lookup may run the `ip` command. It is not a scan. If the lookup fails, you get the usual error and a fix hint. `explain` accepts `--json`. `device`, `baseline`, and `new-devices` use the same ping sweep as `devices`.
+`explain devices --network 192.168.1.0/24` uses that subnet and does not run `ip`. For the router, add `--gateway 192.168.1.1` as well. Without those options, explain looks up your home network and gateway the same way a real run does, which may run the `ip` command. It is not a scan. A bad `--network` gets the usual invalid-target error and fix hint. `explain` accepts `--json`. `device`, `baseline`, and `new-devices` use the same ping sweep as `devices`.
 
 ## Speed contacts Cloudflare
 
