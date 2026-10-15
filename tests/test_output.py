@@ -1,8 +1,24 @@
 """Plain-text formatters. They never scan and never run system commands."""
 
+import json
+
+import homenet.output as output
+from homenet.core.baseline import diff_devices, load_baseline
+from homenet.core.checks import CheckResult
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port, parse_nmap_xml
-from homenet.output import format_device, format_devices, format_error, format_whoami
+from homenet.output import (
+    format_device,
+    format_device_json,
+    format_devices,
+    format_devices_json,
+    format_diff,
+    format_diff_json,
+    format_doctor_json,
+    format_error,
+    format_whoami,
+    format_whoami_json,
+)
 
 _WHOAMI = """\
 This computer on your home network
@@ -240,3 +256,267 @@ def test_format_device_accepts_a_parsed_host(load_fixture):
     assert "53      tcp       open      domain" in text
     assert "80      tcp       open      http" in text
     assert "443     tcp       filtered  unknown" in text
+
+
+_DIFF = """\
+Changes since your saved snapshot
+
+New
+These devices were not in your saved snapshot.
+
+IP address    Name     MAC address        Maker
+192.168.1.42  unknown  3C:22:FB:44:55:66  Apple
+192.168.1.77  unknown  7C:2F:80:DE:AD:01  unknown
+
+Missing
+These devices were in your saved snapshot but are not on the network now.
+
+IP address    Name     MAC address        Maker
+192.168.1.50  unknown  00:11:22:33:44:55  Old Printer Co
+
+Changed
+A detail changed on these devices.
+
+pihole.lan (192.168.1.23)
+
+IP address  was 192.168.1.20, now 192.168.1.23
+
+2 new devices. 1 missing device. 1 changed device.\
+"""
+
+_NO_CHANGES = (
+    "No changes since your saved snapshot.\n"
+    "\n"
+    "The devices on your network match the snapshot you saved with `homenet baseline`."
+)
+
+
+def test_json_shapes_are_documented():
+    doc = output.__doc__ or ""
+    for phrase in (
+        "homenet devices --json",
+        "homenet device <ip> --json",
+        "homenet new-devices --json",
+        "homenet whoami-net --json",
+        "homenet doctor --json",
+        "has_changes",
+        "mac_changed",
+        "fix_hint",
+    ):
+        assert phrase in doc
+
+
+def test_format_diff_reports_new_missing_and_changed(load_fixture, fixtures_dir):
+    old = load_baseline(fixtures_dir / "baseline_v1.json")
+    current = parse_nmap_xml(load_fixture("nmap_sn_hosts.xml"))
+    assert format_diff(diff_devices(old, current)) == _DIFF
+
+
+def test_format_diff_says_when_nothing_changed():
+    device = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", "Router", "router")
+    assert format_diff(diff_devices([device], [device])) == _NO_CHANGES
+
+
+def test_format_diff_flags_a_mac_change_as_spoof_or_replaced():
+    old = Device("192.168.1.5", "aa:aa:aa:aa:aa:aa", "Old\x1bCo", None)
+    current = Device("192.168.1.5", "bb:bb:bb:bb:bb:bb", "New\x1bCo", None)
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert "MAC address changed" in text
+    assert "This may be a spoof or a replaced device." in text
+    assert "Possible spoof or replaced device." in text
+    assert "Was  aa:aa:aa:aa:aa:aa  Old?Co" in text
+    assert "Now  bb:bb:bb:bb:bb:bb  New?Co" in text
+    assert text.endswith("1 MAC address changed.")
+    assert "\nNew\n" not in text
+    assert "\nMissing\n" not in text
+    assert "\nChanged\n" not in text
+
+
+def test_format_diff_uses_the_plural_for_several_mac_changes():
+    old = [
+        Device("192.168.1.5", "aa:aa:aa:aa:aa:aa"),
+        Device("192.168.1.6", "cc:cc:cc:cc:cc:cc"),
+    ]
+    current = [
+        Device("192.168.1.5", "bb:bb:bb:bb:bb:bb"),
+        Device("192.168.1.6", "dd:dd:dd:dd:dd:dd"),
+    ]
+    assert format_diff(diff_devices(old, current)).endswith("2 MAC addresses changed.")
+
+
+def test_format_diff_shows_cleaned_field_changes_and_ignores_mac_case():
+    old = Device("192.168.1.20", "aa:bb:cc:dd:ee:ff", "Dell", "lap\x1btop", [])
+    current = Device(
+        "192.168.1.23",
+        "AA:BB:CC:DD:EE:FF",
+        "HP",
+        "laptop",
+        [Port(22, "tcp", "open", "ssh")],
+    )
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert text == (
+        "Changes since your saved snapshot\n"
+        "\n"
+        "Changed\n"
+        "A detail changed on these devices.\n"
+        "\n"
+        "laptop (192.168.1.23)\n"
+        "\n"
+        "IP address  was 192.168.1.20, now 192.168.1.23\n"
+        "Name        was lap?top, now laptop\n"
+        "Maker       was Dell, now HP\n"
+        "Ports       was none reported, now 22/tcp open (ssh)\n"
+        "\n"
+        "1 changed device."
+    )
+
+
+def test_format_diff_says_when_a_change_cleans_to_the_same_text():
+    old = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", hostname="a\x1b")
+    current = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", hostname="a?")
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert "Details  changed" in text
+
+
+def test_devices_json_shape_nulls_and_sorted_ports():
+    text = format_devices_json(
+        [
+            Device(
+                "192.168.1.10",
+                "AA:BB:CC:DD:EE:10",
+                "Dell",
+                "laptop",
+                [Port(80, "tcp", "open", "http"), Port(53, "udp", "open", None)],
+            ),
+            Device("192.168.1.2", None, "  ", None),
+        ]
+    )
+    assert json.loads(text) == {
+        "devices": [
+            {
+                "hostname": None,
+                "ip": "192.168.1.2",
+                "mac": None,
+                "ports": [],
+                "vendor": None,
+            },
+            {
+                "hostname": "laptop",
+                "ip": "192.168.1.10",
+                "mac": "AA:BB:CC:DD:EE:10",
+                "ports": [
+                    {"number": 53, "protocol": "udp", "service": None, "state": "open"},
+                    {"number": 80, "protocol": "tcp", "service": "http", "state": "open"},
+                ],
+                "vendor": "Dell",
+            },
+        ]
+    }
+    assert text == json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=True)
+
+
+def test_json_dumps_escapes_device_strings():
+    text = format_devices_json([Device("192.168.1.5", 'aa"bb', "v\\endor", 'h"ost\nname')])
+    assert "\nname" not in text
+    host_line = next(line for line in text.splitlines() if "hostname" in line)
+    assert host_line == '      "hostname": "h\\"ost?name",'
+    assert '      "mac": "aa\\"bb",' in text
+    assert '      "vendor": "v\\\\endor"' in text
+    loaded = json.loads(text)
+    assert loaded["devices"][0]["hostname"] == 'h"ost?name'
+    assert loaded["devices"][0]["vendor"] == "v\\endor"
+    assert loaded["devices"][0]["mac"] == 'aa"bb'
+
+
+def test_json_dumps_cannot_be_broken_by_a_device_string():
+    raw = format_devices_json([Device("10.0.0.1", None, None, '"}, "pwn": true')])
+    loaded = json.loads(raw)
+    assert list(loaded) == ["devices"]
+    assert loaded["devices"][0]["hostname"] == '"}, "pwn": true'
+    assert "pwn" not in loaded
+
+
+def test_json_dumps_escapes_non_ascii_and_cleans_controls():
+    text = format_device_json(
+        Device(
+            "192.168.1.9\x1b[2J",
+            None,
+            "caf\u00e9",
+            "x\x1b[2Jy",
+            [Port(80, "tc\x1bp", "open", "ht\x1btp")],
+        )
+    )
+    assert "\x1b" not in text
+    assert "\\u00e9" in text
+    loaded = json.loads(text)
+    assert set(loaded) == {"hostname", "ip", "mac", "ports", "vendor"}
+    assert loaded["hostname"] == "x?[2Jy"
+    assert loaded["ip"] == "192.168.1.9?[2J"
+    assert loaded["vendor"] == "caf\u00e9"
+    assert loaded["ports"] == [
+        {"number": 80, "protocol": "tc?p", "service": "ht?tp", "state": "open"}
+    ]
+
+
+def test_whoami_json_uses_null_for_missing_fields():
+    text = format_whoami_json(NetInfo("eth0\x1b", None, "10.0.0.1", "10.0.0.0/24"))
+    assert "\x1b" not in text
+    assert json.loads(text) == {
+        "gateway": "10.0.0.1",
+        "interface": "eth0?",
+        "ip": None,
+        "subnet": "10.0.0.0/24",
+    }
+
+
+def test_diff_json_shape_covers_every_section():
+    old = Device("192.168.1.5", "aa:aa:aa:aa:aa:aa", "Old", "printer")
+    current = Device("192.168.1.5", "bb:bb:bb:bb:bb:bb", "New\x1b", "phone")
+    added = Device("192.168.1.9", None, None, "cam\x1bera")
+    text = format_diff_json(diff_devices([old], [current, added]))
+    assert "\x1b" not in text
+    loaded = json.loads(text)
+    assert set(loaded) == {"changed", "has_changes", "mac_changed", "missing", "new"}
+    assert loaded["has_changes"] is True
+    assert loaded["changed"] == []
+    assert loaded["missing"] == []
+    assert loaded["new"][0]["hostname"] == "cam?era"
+    pair = loaded["mac_changed"][0]
+    assert set(pair) == {"before", "after"}
+    assert pair["before"]["mac"] == "aa:aa:aa:aa:aa:aa"
+    assert pair["after"]["hostname"] == "phone"
+    assert pair["after"]["vendor"] == "New?"
+
+
+def test_diff_json_has_changes_is_false_when_nothing_changed():
+    device = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa")
+    loaded = json.loads(format_diff_json(diff_devices([device], [device])))
+    assert loaded["has_changes"] is False
+    assert loaded["new"] == []
+    assert loaded["missing"] == []
+    assert loaded["changed"] == []
+    assert loaded["mac_changed"] == []
+
+
+def test_doctor_json_ok_ignores_warnings_and_cleans_details():
+    warning = format_doctor_json(
+        [
+            CheckResult("nmap", True, "nmap 7.95", None, "ok"),
+            CheckResult("privileges", False, "user on eth0\x1b", "Re-run", "warning"),
+        ]
+    )
+    assert "\x1b" not in warning
+    loaded = json.loads(warning)
+    assert loaded["ok"] is True
+    assert loaded["checks"][1]["detail"] == "user on eth0?"
+    assert loaded["checks"][1]["fix_hint"] == "Re-run"
+    failed = json.loads(
+        format_doctor_json(
+            [CheckResult("nmap", False, "missing", "sudo apt install nmap", "error")]
+        )
+    )
+    assert failed["ok"] is False
+    assert failed["checks"][0]["fix_hint"] == "sudo apt install nmap"
