@@ -17,11 +17,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from homenet.core.commands import Command, run_command
+from homenet.core.commands import Command, run_command, stream_command
 
 DEFAULT_TIMEOUT = 120.0
 MAX_PREFIX_LEN = 16  # refuse ranges larger than a /16
 MAX_TOP_PORTS = 1000
+MAX_STATS_EVERY = 3600  # seconds
+_STATS_VALUE = re.compile(r"[1-9][0-9]{0,3}s")
 
 _ALLOWED_RANGES = (
     ipaddress.ip_network("10.0.0.0/8"),
@@ -59,6 +61,7 @@ ALLOWED_FLAGS = frozenset(
         "-T3",
         "-T4",
         "--privileged",
+        "--stats-every",  # only as "--stats-every <N>s", built by build_args
     }
 )
 
@@ -244,6 +247,10 @@ def check_flags(flags: Sequence[str]) -> None:
         )
     for flag in flags:
         base = flag.split("=", 1)[0]
+        if base == "--stats-every" and flag != base:
+            raise DisallowedFlagError(
+                f"nmap option {flag!r} is not allowed; use stats_every=<seconds>."
+            )
         if (
             base in BLOCKED_FLAGS
             or base.startswith("--script")
@@ -267,8 +274,12 @@ def build_args(
     force: bool = False,
     nmap_path: str = "nmap",
     privileged: bool = False,
+    stats_every: int | None = None,
 ) -> list[str]:
-    """Build the nmap argument list. Pure: runs nothing."""
+    """Build the nmap argument list. Pure: runs nothing.
+
+    ``stats_every`` (whole seconds, 1-3600) adds exactly ``--stats-every <N>s``.
+    """
     if mode not in SCAN_MODES:
         raise DisallowedFlagError(
             f"Unknown scan mode {mode!r}.", f"Choose one of: {', '.join(SCAN_MODES)}."
@@ -285,8 +296,22 @@ def build_args(
         flags += ["--top-ports", str(top_ports)]
     if privileged:
         flags.append("--privileged")  # caps without root: tell nmap to use raw sockets
+    stats_value = None
+    if stats_every is not None:
+        if (
+            not isinstance(stats_every, int)
+            or isinstance(stats_every, bool)
+            or not (1 <= stats_every <= MAX_STATS_EVERY)
+        ):
+            raise DisallowedFlagError(
+                f"stats_every must be a whole number of seconds from 1 to {MAX_STATS_EVERY}."
+            )
+        stats_value = f"{stats_every}s"
+        flags += ["--stats-every", stats_value]
     flags += ["-T4", "-oX", "-"]
-    check_flags([f for f in flags if not f.isdigit() and f != "-"])
+    check_flags([f for f in flags if not f.isdigit() and f != "-" and f != stats_value])
+    if stats_value is not None and not _STATS_VALUE.fullmatch(stats_value):
+        raise DisallowedFlagError(f"Bad --stats-every value {stats_value!r}.")
     return [nmap_path, *flags, str(net)]
 
 
@@ -315,6 +340,7 @@ def build_scan_command(
     force: bool = False,
     privileged: bool = False,
     nmap_path: str | None = None,
+    stats_every: int | None = None,
 ) -> Command:
     """The single source of the nmap Command (validated; runs nothing)."""
     args = build_args(
@@ -325,6 +351,7 @@ def build_scan_command(
         force=force,
         nmap_path=nmap_path or shutil.which("nmap") or "nmap",
         privileged=privileged,
+        stats_every=stats_every,
     )
     purpose = {
         "ping": "find devices that are up (ping sweep)",
@@ -345,10 +372,14 @@ def run_scan(
     timeout: float = DEFAULT_TIMEOUT,
     geteuid: Callable[[], int] | None = None,
     read_text: Callable[[str], str] | None = None,
+    stats_every: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> ScanResult:
     """Validate, run nmap and return its XML output. Raises NmapError subclasses.
 
     Runs exactly ``build_scan_command(...).argv``; the command hook sees it first.
+    With ``on_progress``, nmap's stderr is streamed to it line by line (callback
+    errors are ignored); the timeout and no-shell behaviour are the same.
     """
     privileged = privileged_for(mode, geteuid, read_text)
     nmap = shutil.which("nmap")
@@ -361,11 +392,15 @@ def run_scan(
         force=force,
         privileged=privileged,
         nmap_path=nmap or "nmap",
+        stats_every=stats_every,
     )
     if nmap is None:
         raise NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap")
     try:
-        proc = run_command(cmd, timeout)
+        if on_progress is None:
+            proc = run_command(cmd, timeout)
+        else:
+            proc = stream_command(cmd, timeout, on_progress)
     except subprocess.TimeoutExpired as exc:
         raise NmapTimeoutError(
             f"nmap did not finish within {timeout:g} seconds.",

@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from homenet.core.commands import emit
 from homenet.core.devices import normalize_mac
 from homenet.core.parser import Device, Port
 
@@ -188,3 +189,37 @@ def diff_devices(baseline: Sequence[Device], current: Sequence[Device]) -> Devic
     result.missing = unmatched_old
     result.changed = [(o, c) for o, c in pairs if not _same(o, c)]
     return result
+
+
+def take_baseline(
+    target=None,
+    *,
+    path: Path | None = None,
+    on_step: Callable[[str], None] | None = None,
+    sweep_fn: Callable[..., list[Device]] | None = None,
+    **sweep_kwargs,
+) -> tuple[Path, list[Device]]:
+    """Sweep the network and save the result as the baseline."""
+    from homenet.core.devices import sweep
+
+    found = (sweep_fn or sweep)(target, on_step=on_step, **sweep_kwargs)
+    emit(on_step, f"Saving baseline ({len(found)} device{'s' if len(found) != 1 else ''})")
+    return save_baseline(found, path), found
+
+
+def check_new_devices(
+    target=None,
+    *,
+    path: Path | None = None,
+    on_step: Callable[[str], None] | None = None,
+    sweep_fn: Callable[..., list[Device]] | None = None,
+    **sweep_kwargs,
+) -> DeviceDiff:
+    """Load the saved baseline, sweep again and diff. Missing baseline raises first."""
+    from homenet.core.devices import sweep
+
+    emit(on_step, "Loading baseline")
+    saved = load_baseline(path)
+    found = (sweep_fn or sweep)(target, on_step=on_step, **sweep_kwargs)
+    emit(on_step, "Comparing with baseline")
+    return diff_devices(saved, found)

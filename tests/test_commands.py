@@ -71,54 +71,67 @@ def test_display_and_dict():
 # ---- one test per wrapper: executed argv == built argv, hook sees it first ----
 
 
-def test_runner_executes_built_argv(executed, seen):
+def _run_scan():
     runner.run_scan("192.168.1.0/24", local_network=NET)
-    built = runner.build_scan_command("192.168.1.0/24", local_network=NET)
-    assert executed == [built.argv] and seen == [built]
+    return [runner.build_scan_command("192.168.1.0/24", local_network=NET)]
 
 
-def test_ip_executes_built_argv(executed, seen):
+def _run_ip():
     with pytest.raises(netinfo.NetInfoError):  # "[]" = no default route
         netinfo.detect()
-    assert executed == [netinfo.build_ip_command(netinfo.ROUTE_ARGS).argv] == [seen[0].argv]
+    return [netinfo.build_ip_command(netinfo.ROUTE_ARGS)]
 
 
-def test_doctor_tools_and_ping_execute_built_argv(executed, seen):
+def _run_doctor():
     checks.check_tool("nmap")
     checks.check_ping("192.168.1.1")
-    built = [
+    return [
         checks.build_version_command("nmap", "/usr/bin/nmap"),
         checks.build_ping_command("192.168.1.1", "/bin/ping"),
     ]
-    assert executed == [c.argv for c in built] and seen == built
 
 
-def test_avahi_executes_built_argv(executed, seen):
+def _run_avahi():
     assert devices.mdns_name("192.168.1.42") == "box.local"
-    built = devices.build_avahi_command("192.168.1.42", "/usr/bin/avahi-resolve")
-    assert executed == [built.argv] and seen == [built]
+    return [devices.build_avahi_command("192.168.1.42", "/usr/bin/avahi-resolve")]
 
 
-def test_router_hook_url_equals_fetched_url(seen):
-    fetched = []
-
+def _run_router(fetched):
     def fetch(url, timeout, verify):
         fetched.append(url)
         return FetchResult(200, {}, "")
 
     router.check_router_admin("192.168.1.1", local_network=NET, fetch=fetch)
-    assert (
-        [c.url for c in seen]
-        == fetched
-        == [c.url for c in plan_router("192.168.1.1", local_network=NET)]
-    )
-    assert all(c.kind == "http" for c in seen)
+    return plan_router("192.168.1.1", local_network=NET)
 
 
-def test_speed_hook_url_equals_fetched_url(seen):
-    fetched = []
+def _run_speed(fetched):
     speed.measure_download(nbytes=1000, fetch=lambda u, t, n: fetched.append(u) or b"x" * n)
-    assert [c.url for c in seen] == fetched == [c.url for c in plan_speed(nbytes=1000)]
+    return plan_speed(nbytes=1000)
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "kind"),
+    [
+        (_run_scan, "exec"),
+        (_run_ip, "exec"),
+        (_run_doctor, "exec"),
+        (_run_avahi, "exec"),
+        (_run_router, "http"),
+        (_run_speed, "http"),
+    ],
+    ids=["nmap", "ip", "doctor", "avahi", "router", "speed"],
+)
+def test_wrapper_runs_exactly_the_built_command(wrapper, kind, executed, seen):
+    """What the hook sees == what was built/planned == what actually ran or was fetched."""
+    if kind == "exec":
+        built = wrapper()
+        assert executed == [c.argv for c in built]
+    else:
+        fetched = []
+        built = wrapper(fetched)
+        assert fetched == [c.url for c in built] and executed == []
+    assert [(c.argv, c.kind) for c in seen] == [(c.argv, c.kind) for c in built]
 
 
 # ---- planners never execute and still validate ----

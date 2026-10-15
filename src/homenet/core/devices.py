@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
-from homenet.core.commands import Command, notify, run_command
+from homenet.core.commands import Command, emit, notify, run_command
 from homenet.core.netinfo import _run_ip
 from homenet.core.parser import Device, parse_nmap_xml
 from homenet.core.runner import (
@@ -176,6 +176,9 @@ def sweep(
     scan: ScanFn | None = None,
     resolver: Resolver | None = None,
     ip_runner: Callable[[Sequence[str]], str] | None = None,
+    stats_every: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_step: Callable[[str], None] | None = None,
 ) -> list[Device]:
     """Run a ``-sn`` ping sweep and return the devices found.
 
@@ -195,10 +198,21 @@ def sweep(
         )
     net = str(ipaddress.ip_network(target, strict=False))
     local_str = str(ipaddress.ip_network(local, strict=False)) if local is not None else None
-    result = (scan or run_scan)(net, "ping", local_network=local_str, force=force, timeout=timeout)
+    extra = {}
+    if stats_every is not None:
+        extra["stats_every"] = stats_every
+    if on_progress is not None:
+        extra["on_progress"] = on_progress
+    emit(on_step, f"Scanning {net}")
+    result = (scan or run_scan)(
+        net, "ping", local_network=local_str, force=force, timeout=timeout, **extra
+    )
     devices = parse_nmap_xml(result.xml)
+    emit(on_step, f"Parsed {len(devices)} host{'s' if len(devices) != 1 else ''}")
     if not resolve_names:
         return devices
+    if any(not d.hostname for d in devices):
+        emit(on_step, "Resolving names…")
     names = resolve_all([d.ip for d in devices if not d.hostname], resolver, budget=resolve_budget)
     return [d if d.hostname else dataclasses.replace(d, hostname=names.get(d.ip)) for d in devices]
 
