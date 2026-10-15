@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from homenet.cli import BANNER, main
-from homenet.core import baseline, checks, devices, netinfo
+from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError, BaselineNotFoundError, diff_devices
 from homenet.core.checks import CheckResult
 from homenet.core.netinfo import NetInfo, NetInfoError
-from homenet.core.parser import Device, ParseError
-from homenet.core.runner import NmapNotFoundError
+from homenet.core.parser import Device, ParseError, Port
+from homenet.core.router import AdminPage, RouterCheck
+from homenet.core.runner import NmapNotFoundError, TargetNotAllowedError
+from homenet.core.speed import SpeedError, SpeedResult
 from homenet.output import (
     format_device,
     format_device_json,
@@ -24,6 +26,14 @@ from homenet.output import (
     format_doctor_json,
     format_error,
     format_error_json,
+    format_ports,
+    format_ports_json,
+    format_router,
+    format_router_json,
+    format_services,
+    format_services_json,
+    format_speed,
+    format_speed_json,
     format_whoami,
     format_whoami_json,
 )
@@ -137,40 +147,11 @@ def test_command_help_says_what_it_does_and_gives_an_example(command, capsys):
         assert "ping" in out
 
 
-@pytest.mark.parametrize("command", ("router",))
-def test_scan_stub_prints_banner_and_exits_nonzero(command, capsys):
-    code = main([command])
-    assert code == 1
-    out = capsys.readouterr().out
-    assert BANNER in out
-    assert f"{command} is not implemented yet." in out
-
-
-@pytest.mark.parametrize(
-    ("command", "ip"),
-    [("ports", "192.168.1.1"), ("services", "192.168.1.1")],
-)
-def test_ip_scan_stub_prints_banner_and_exits_nonzero(command, ip, capsys):
-    code = main([command, ip])
-    assert code == 1
-    out = capsys.readouterr().out
-    assert BANNER in out
-    assert f"{command} is not implemented yet." in out
-
-
 @pytest.mark.parametrize("command", ("device", "ports", "services"))
 def test_ip_commands_require_an_address(command):
     with pytest.raises(SystemExit) as exc:
         main([command])
-    assert exc.value.code != 0
-
-
-def test_speed_stub_is_not_implemented(capsys):
-    code = main(["speed"])
-    assert code == 1
-    out = capsys.readouterr().out
-    assert "speed is not implemented yet." in out
-    assert BANNER not in out
+    assert exc.value.code == 2
 
 
 def test_missing_command_is_an_error():
@@ -387,7 +368,17 @@ def _patch_lookup(monkeypatch, result):
 
 @pytest.mark.parametrize(
     "command",
-    ("whoami-net", "devices", "device", "new-devices", "doctor"),
+    (
+        "whoami-net",
+        "devices",
+        "device",
+        "ports",
+        "services",
+        "router",
+        "new-devices",
+        "speed",
+        "doctor",
+    ),
 )
 def test_json_flag_is_documented_on_the_commands_that_print_it(command, capsys):
     with pytest.raises(SystemExit) as exc:
@@ -398,7 +389,7 @@ def test_json_flag_is_documented_on_the_commands_that_print_it(command, capsys):
     assert "Errors go to stderr" in out
 
 
-@pytest.mark.parametrize("command", ("baseline", "router", "speed", "ports", "services"))
+@pytest.mark.parametrize("command", ("baseline",))
 def test_other_commands_have_no_json_flag(command, capsys):
     with pytest.raises(SystemExit):
         main([command, "--help"])
@@ -734,3 +725,328 @@ def test_doctor_json(results, code, ok, capsys, monkeypatch):
         assert loaded["checks"][1]["severity"] == "warning"
     if any("\x1b" in result.detail for result in results):
         assert loaded["checks"][0]["detail"] == "user on eth0?"
+
+
+ROUTER_HOST = Device(
+    "192.168.1.1",
+    "aa:bb:cc:dd:ee:ff",
+    "TP-Link",
+    "router.lan",
+    [
+        Port(80, "tcp", "open", "http"),
+        Port(443, "tcp", "filtered"),
+        Port(53, "tcp", "open", "domain"),
+    ],
+)
+OTHER_HOST = Device("192.168.1.50", None, None, "phone", [Port(9, "tcp", "open", "discard")])
+
+
+def _patch_port_scan(monkeypatch, name, result):
+    calls = {}
+
+    def scan(target=None, **kwargs):
+        calls["target"] = target
+        calls["kwargs"] = kwargs
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(ports, name, scan)
+    return calls
+
+
+def test_ports_scans_top_100_and_explains_open_ports(capsys, monkeypatch):
+    calls = _patch_port_scan(monkeypatch, "scan_ports", [ROUTER_HOST, OTHER_HOST])
+    seen = {}
+    real = port_notes.notes_for_ports
+
+    def wrapped(items):
+        seen["ports"] = list(items)
+        return real(items)
+
+    monkeypatch.setattr(port_notes, "notes_for_ports", wrapped)
+    assert main(["ports", "192.168.1.1"]) == 0
+    captured = capsys.readouterr()
+    assert calls["target"] == "192.168.1.1"
+    assert calls["kwargs"] == {"top_ports": 100}
+    assert seen["ports"] == ROUTER_HOST.ports
+    notes = real(ROUTER_HOST.ports)
+    assert captured.out == f"{BANNER}\n\n{format_ports(ROUTER_HOST, notes)}\n"
+    assert captured.err == ""
+    assert "risk: medium" in captured.out
+    assert "Avoid entering passwords" in captured.out
+    assert "192.168.1.50" not in captured.out
+    assert "filtered" not in captured.out
+
+
+def test_ports_json_has_no_banner(capsys, monkeypatch):
+    hostile = Device(
+        "192.168.1.1",
+        None,
+        None,
+        "r\x1bouter",
+        [Port(80, "tcp", "open", "http")],
+    )
+    _patch_port_scan(monkeypatch, "scan_ports", [hostile])
+    assert main(["ports", "192.168.1.1", "--json"]) == 0
+    captured = capsys.readouterr()
+    notes = port_notes.notes_for_ports(hostile.ports)
+    assert captured.out == format_ports_json(hostile, notes) + "\n"
+    assert captured.err == ""
+    assert BANNER not in captured.out
+    assert "\x1b" not in captured.out
+    assert json.loads(captured.out)["hostname"] == "r?outer"
+
+
+def test_ports_with_no_open_ports_still_succeeds(capsys, monkeypatch):
+    quiet = Device("192.168.1.20", None, None, None, [Port(22, "tcp", "closed", "ssh")])
+    _patch_port_scan(monkeypatch, "scan_ports", [quiet])
+    assert main(["ports", "192.168.1.20"]) == 0
+    out = capsys.readouterr().out
+    assert "No open ports were found." in out
+    assert BANNER in out
+
+
+def test_ports_error_shows_a_hint_without_a_traceback(capsys, monkeypatch):
+    _patch_port_scan(
+        monkeypatch,
+        "scan_ports",
+        NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap"),
+    )
+    assert main(["ports", "192.168.1.1"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.startswith(BANNER + "\n")
+    assert "Fix: Try: sudo apt install nmap" in captured.out
+    assert "Traceback" not in captured.out
+    assert "NmapNotFoundError" not in captured.out
+
+
+def test_ports_json_error_is_an_object_on_stderr(capsys, monkeypatch):
+    _patch_port_scan(
+        monkeypatch,
+        "scan_ports",
+        ParseError("nmap output was incomplete.", "Try the scan again."),
+    )
+    assert main(["ports", "192.168.1.1", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        captured.err
+        == format_error_json("nmap output was incomplete.", "Try the scan again.") + "\n"
+    )
+    assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+    assert BANNER not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("ip", "phrase"),
+    [
+        ("192.168.1.0/24", "is a subnet"),
+        ("router.lan", "is not a valid IP address"),
+        ("2001:db8::1", "is not an IPv4 address"),
+    ],
+)
+def test_ports_rejects_a_bad_target_before_scanning(ip, phrase, capsys, monkeypatch):
+    calls = _patch_port_scan(monkeypatch, "scan_ports", [ROUTER_HOST])
+    assert main(["ports", ip]) == 1
+    captured = capsys.readouterr()
+    assert calls == {}
+    assert phrase in captured.out
+    assert "Fix:" in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_ports_says_when_nothing_answered(capsys, monkeypatch):
+    _patch_port_scan(monkeypatch, "scan_ports", [])
+    assert main(["ports", "192.168.1.9"]) == 1
+    out = capsys.readouterr().out
+    assert "No device answered at 192.168.1.9." in out
+    assert "homenet devices" in out
+
+
+def test_services_scans_one_host_and_shows_product_and_version(capsys, monkeypatch):
+    host = Device(
+        "192.168.1.1",
+        None,
+        None,
+        "router.lan",
+        [
+            Port(22, "tcp", "open", "ssh", "Dropbear sshd", "2022.83"),
+            Port(80, "tcp", "open", "http", "lighttpd", None),
+            Port(443, "tcp", "closed", "https"),
+        ],
+    )
+    calls = _patch_port_scan(monkeypatch, "scan_services", [host])
+    assert main(["services", "192.168.1.1"]) == 0
+    captured = capsys.readouterr()
+    assert calls["target"] == "192.168.1.1"
+    assert calls["kwargs"] == {"top_ports": 100}
+    assert "allow_subnet" not in calls["kwargs"]
+    assert captured.out == f"{BANNER}\n\n{format_services(host)}\n"
+    assert "Dropbear sshd" in captured.out
+    assert "2022.83" in captured.out
+    assert "lighttpd" in captured.out
+    assert "443" not in captured.out
+
+
+def test_services_json_includes_product_and_version(capsys, monkeypatch):
+    host = Device(
+        "192.168.1.1",
+        None,
+        None,
+        "router\x1b",
+        [Port(22, "tcp", "open", "ssh", "Drop\x1bbear", "1\x1b.2")],
+    )
+    _patch_port_scan(monkeypatch, "scan_services", [host])
+    assert main(["services", "192.168.1.1", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_services_json(host) + "\n"
+    assert "\x1b" not in captured.out
+    service = json.loads(captured.out)["services"][0]
+    assert service["product"] == "Drop?bear"
+    assert service["version"] == "1?.2"
+    assert json.loads(captured.out)["hostname"] == "router?"
+
+
+def test_services_help_has_no_subnet_option(capsys):
+    with pytest.raises(SystemExit):
+        main(["services", "--help"])
+    out = capsys.readouterr().out
+    assert "--subnet" not in out
+    assert "allow_subnet" not in out
+
+
+def test_services_does_not_scan_a_subnet(capsys, monkeypatch):
+    calls = _patch_port_scan(monkeypatch, "scan_services", [ROUTER_HOST])
+    assert main(["services", "192.168.1.0/24"]) == 1
+    assert calls == {}
+    assert "one device" in capsys.readouterr().out
+
+
+def test_router_explains_plain_http_and_safe_steps(capsys, monkeypatch):
+    result = RouterCheck(
+        "192.168.1.1",
+        [
+            AdminPage("http://192.168.1.1/", 80, True, True, 200, "Router Login", "lighttpd"),
+            AdminPage("https://192.168.1.1/", 443, True, False, 401, None, None),
+            AdminPage("http://192.168.1.1:8080/", 8080, False, True, error="timed out"),
+        ],
+    )
+    calls = {}
+
+    def check(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return result
+
+    monkeypatch.setattr(router, "check_router_admin", check)
+    assert main(["router"]) == 0
+    captured = capsys.readouterr()
+    assert calls == {"args": (), "kwargs": {}}
+    assert captured.out == f"{BANNER}\n\n{format_router(result)}\n"
+    assert "not encrypted" in captured.out
+    assert "Safe next steps" in captured.out
+    assert "did not log in" in captured.out
+    assert "Prefer the HTTPS address" in captured.out
+
+
+def test_router_with_nothing_reachable_still_succeeds(capsys, monkeypatch):
+    result = RouterCheck(
+        "192.168.1.1",
+        [AdminPage("http://192.168.1.1/", 80, False, True, error="connection refused")],
+    )
+    monkeypatch.setattr(router, "check_router_admin", lambda: result)
+    assert main(["router"]) == 0
+    out = capsys.readouterr().out
+    assert "not reachable" in out
+    assert "No admin page answered" in out
+    assert "Do not guess passwords." in out
+
+
+def test_router_json_error_uses_the_shared_shape(capsys, monkeypatch):
+    def check():
+        raise TargetNotAllowedError(
+            "Could not detect your router (default gateway).",
+            "Check you are connected (see `homenet whoami-net`).",
+        )
+
+    monkeypatch.setattr(router, "check_router_admin", check)
+    assert main(["router", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    loaded = json.loads(captured.err)
+    assert set(loaded) == {"error", "fix_hint"}
+    assert "default gateway" in loaded["error"]
+    assert loaded["fix_hint"]
+    assert BANNER not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_router_json_cleans_page_text(capsys, monkeypatch):
+    result = RouterCheck(
+        "192.168.1.1\x1b",
+        [AdminPage("http://192.168.1.1/\x1b", 80, True, True, 200, "Hi\x1b", "ng\x1binx")],
+    )
+    monkeypatch.setattr(router, "check_router_admin", lambda: result)
+    assert main(["router", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_router_json(result) + "\n"
+    assert "\x1b" not in captured.out
+    assert BANNER not in captured.out
+    loaded = json.loads(captured.out)
+    assert loaded["gateway"] == "192.168.1.1?"
+    assert loaded["admin_reachable"] is True
+    assert loaded["plain_http_reachable"] is True
+    assert loaded["pages"][0]["title"] == "Hi?"
+
+
+def test_speed_prints_numbers_and_no_banner(capsys, monkeypatch):
+    result = SpeedResult(8.0, 1_000_000, 1.0, "https://speed.cloudflare.com/__down?bytes=1000000")
+    calls = {}
+
+    def measure(**kwargs):
+        calls["kwargs"] = kwargs
+        return result
+
+    monkeypatch.setattr(speed, "measure_download", measure)
+    assert main(["speed"]) == 0
+    captured = capsys.readouterr()
+    assert calls["kwargs"] == {}
+    assert captured.out == format_speed(result) + "\n"
+    assert BANNER not in captured.out
+    assert "8.00 Mb/s" in captured.out
+    assert captured.err == ""
+
+
+def test_speed_json_and_error(capsys, monkeypatch):
+    result = SpeedResult(8.0, 1000, 1.0, "https://example.test/\x1b")
+    monkeypatch.setattr(speed, "measure_download", lambda **kwargs: result)
+    assert main(["speed", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_speed_json(result) + "\n"
+    assert json.loads(captured.out)["url"] == "https://example.test/?"
+    assert "\x1b" not in captured.out
+
+    def fail(**kwargs):
+        raise SpeedError("Could not measure your internet speed.", "Check the internet.")
+
+    monkeypatch.setattr(speed, "measure_download", fail)
+    assert main(["speed", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+    assert "Traceback" not in captured.err
+
+
+def test_json_usage_error_prints_an_error_object(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["ports", "--json"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    loaded = json.loads(captured.err)
+    assert set(loaded) == {"error", "fix_hint"}
+    assert "required" in loaded["error"]
+    assert loaded["fix_hint"]
+    assert "usage:" not in captured.err
+    assert "Traceback" not in captured.err

@@ -16,6 +16,11 @@ Input shapes for Net Core to match:
   ``state``, ``service``).
 * :func:`format_diff` takes one :class:`homenet.core.baseline.DeviceDiff`
   (``new``, ``missing``, ``changed``, ``mac_changed``, ``has_changes``).
+* :func:`format_ports` takes one :class:`~homenet.core.parser.Device` and the
+  :class:`~homenet.core.port_notes.PortNote` list from ``notes_for_ports``.
+* :func:`format_services` takes one device and shows ``product`` and ``version``.
+* :func:`format_router` takes one :class:`~homenet.core.router.RouterCheck`.
+* :func:`format_speed` takes one :class:`~homenet.core.speed.SpeedResult`.
 
 Missing device fields (``hostname``, ``mac``, ``vendor``, ``service``) are
 shown as ``unknown``. Missing network fields are shown as ``not available``.
@@ -57,9 +62,38 @@ result (quotes, backslashes, and non-ASCII).
                 "state": str|null}, ...],
      "vendor": str|null}
 
+``homenet ports <ip> --json`` (open ports only)::
+
+    {"hostname": str|null, "ip": str|null,
+     "ports": [{"name": str|null, "note": str|null, "number": int,
+                "protocol": str|null, "risk": str|null, "service": str|null,
+                "state": str|null}, ...]}
+
+``homenet services <ip> --json`` (open ports only)::
+
+    {"hostname": str|null, "ip": str|null,
+     "services": [{"number": int, "product": str|null, "protocol": str|null,
+                   "service": str|null, "state": str|null,
+                   "version": str|null}, ...]}
+
+``homenet router --json``::
+
+    {"admin_reachable": bool, "gateway": str|null,
+     "pages": [{"error": str|null, "plain_http": bool, "port": int,
+                "reachable": bool, "server": str|null, "status": int|null,
+                "title": str|null, "url": str|null}, ...],
+     "plain_http_reachable": bool}
+
+``homenet speed --json``::
+
+    {"bytes": int, "download_mbps": number, "seconds": number, "url": str|null}
+
 ``doctor`` ``ok`` is false only when a check failed at error severity.
 Warnings leave it true. ``new-devices`` exits 0 when ``has_changes`` is false,
 1 when it is true, and 2 when the command fails.
+``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
+when the command fails. No open ports, and a router with no admin page, are
+still success. Argparse usage errors exit 2.
 
 ``--json`` errors are a JSON object on stderr::
 
@@ -77,6 +111,9 @@ from homenet.core.checks import CheckResult
 from homenet.core.devices import normalize_mac
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port
+from homenet.core.port_notes import GENERIC_NOTE, PortNote
+from homenet.core.router import AdminPage, RouterCheck
+from homenet.core.speed import SpeedResult
 
 _UNKNOWN = "unknown"
 _NOT_AVAILABLE = "not available"
@@ -284,6 +321,282 @@ def format_doctor_json(results: Sequence[CheckResult]) -> str:
         ],
     }
     return _dumps(payload)
+
+
+def format_ports(device: Device, notes: Sequence[PortNote]) -> str:
+    """Open ports with a plain-English risk note for each one."""
+    title = _host_heading("Open ports on", device)
+    open_ports = _open_ports(device)
+    if not open_ports:
+        return "\n".join(
+            [
+                title,
+                "",
+                "No open ports were found.",
+                "",
+                "That is normal for phones and many computers. "
+                "They usually do not listen for connections.",
+            ]
+        )
+    blocks = [_port_block(port, _find_note(port, notes)) for port in open_ports]
+    count = len(open_ports)
+    noun = "open port" if count == 1 else "open ports"
+    return "\n".join(
+        [
+            title,
+            "",
+            "\n\n".join(blocks),
+            "",
+            f"{count} {noun}.",
+            "High means a service that is often attacked. Turn it off if you do not use it.",
+            "Medium means be careful, especially with passwords.",
+            "Low means this is normal on a home device.",
+        ]
+    )
+
+
+def format_ports_json(device: Device, notes: Sequence[PortNote]) -> str:
+    """JSON for ``homenet ports <ip> --json``. See the module docstring."""
+    payload = {
+        "ip": _clean(device.ip),
+        "hostname": _clean(device.hostname),
+        "ports": [_port_payload(port, _find_note(port, notes)) for port in _open_ports(device)],
+    }
+    return _dumps(payload)
+
+
+def format_services(device: Device) -> str:
+    """Open services, including the program name and version when known."""
+    title = _host_heading("Services on", device)
+    open_ports = _open_ports(device)
+    if not open_ports:
+        return "\n".join(
+            [
+                title,
+                "",
+                "No running services were identified.",
+                "",
+                "Nothing on this device accepted a connection. "
+                "That is normal for phones and many computers.",
+            ]
+        )
+    rows = [
+        (
+            str(port.number),
+            _text(port.protocol, _UNKNOWN),
+            _text(port.service, _UNKNOWN),
+            _text(port.product, _UNKNOWN),
+            _text(port.version, _UNKNOWN),
+        )
+        for port in open_ports
+    ]
+    return "\n".join(
+        [
+            title,
+            "",
+            _render_table(("Number", "Protocol", "Service", "Product", "Version"), rows),
+            "",
+            "Product is the program. Version is the release, when the scan could tell.",
+            "Unknown means the scan could not name it.",
+        ]
+    )
+
+
+def format_services_json(device: Device) -> str:
+    """JSON for ``homenet services <ip> --json``. See the module docstring."""
+    payload = {
+        "ip": _clean(device.ip),
+        "hostname": _clean(device.hostname),
+        "services": [
+            {
+                "number": port.number,
+                "protocol": _clean(port.protocol),
+                "state": _clean(port.state),
+                "service": _clean(port.service),
+                "product": _clean(port.product),
+                "version": _clean(port.version),
+            }
+            for port in _open_ports(device)
+        ],
+    }
+    return _dumps(payload)
+
+
+def format_router(result: RouterCheck) -> str:
+    """What the router admin check found, plus safe next steps."""
+    rows = (
+        ("Gateway", _text(result.gateway, _UNKNOWN)),
+        ("Admin page", "reachable" if result.admin_reachable else "not reachable"),
+        ("Plain HTTP", "yes" if result.plain_http_reachable else "no"),
+    )
+    pages = "\n\n".join(_page_block(page) for page in result.pages)
+    lines = ["Your home router", "", _pairs(rows), "", "Pages", "", pages, ""]
+    lines.extend(_router_meaning(result))
+    return "\n".join(lines)
+
+
+def format_router_json(result: RouterCheck) -> str:
+    """JSON for ``homenet router --json``. See the module docstring."""
+    payload = {
+        "gateway": _clean(result.gateway),
+        "admin_reachable": result.admin_reachable,
+        "plain_http_reachable": result.plain_http_reachable,
+        "pages": [_page_payload(page) for page in result.pages],
+    }
+    return _dumps(payload)
+
+
+def format_speed(result: SpeedResult) -> str:
+    """Plain numbers for one short download sample."""
+    rows = (
+        ("Download", f"{result.download_mbps:.2f} Mb/s"),
+        ("Sample", f"{result.bytes_read} bytes"),
+        ("Time", f"{result.seconds:.3f} seconds"),
+    )
+    return "\n".join(
+        [
+            "Internet download speed",
+            "",
+            _pairs(rows),
+            "",
+            "This is a short download from the internet, not a full speed test.",
+            "Wi-Fi and other devices in your home can make this lower than your plan.",
+            "Mb/s means megabits per second, the unit internet plans use.",
+        ]
+    )
+
+
+def format_speed_json(result: SpeedResult) -> str:
+    """JSON for ``homenet speed --json``. See the module docstring."""
+    payload = {
+        "download_mbps": result.download_mbps,
+        "bytes": result.bytes_read,
+        "seconds": result.seconds,
+        "url": _clean(result.url),
+    }
+    return _dumps(payload)
+
+
+def _host_heading(prefix: str, device: Device) -> str:
+    ip = _text(device.ip, _UNKNOWN)
+    name = _clean(device.hostname)
+    if name:
+        return f"{prefix} {name} ({ip})"
+    return f"{prefix} {ip}"
+
+
+def _open_ports(device: Device) -> list[Port]:
+    return sorted((port for port in device.ports if port.state == "open"), key=_port_sort_key)
+
+
+def _find_note(port: Port, notes: Sequence[PortNote]) -> PortNote | None:
+    proto = (port.protocol or "tcp").lower()
+    for note in notes:
+        if note.port == port.number and note.protocol.lower() == proto:
+            return note
+    return None
+
+
+def _port_block(port: Port, note: PortNote | None) -> str:
+    name = _clean(note.name) if note else _clean(port.service)
+    risk = _clean(note.risk) if note else "medium"
+    text = _clean(note.note) if note else _clean(GENERIC_NOTE)
+    proto = _text(port.protocol, _UNKNOWN)
+    return (
+        f"{port.number}/{proto}  {name or _UNKNOWN}  risk: {risk or _UNKNOWN}\n  {text or _UNKNOWN}"
+    )
+
+
+def _port_payload(port: Port, note: PortNote | None) -> dict:
+    name = _clean(note.name) if note else _clean(port.service)
+    risk = _clean(note.risk) if note else "medium"
+    text = _clean(note.note) if note else _clean(GENERIC_NOTE)
+    return {
+        "number": port.number,
+        "protocol": _clean(port.protocol),
+        "state": _clean(port.state),
+        "service": _clean(port.service),
+        "name": name,
+        "risk": risk,
+        "note": text,
+    }
+
+
+def _page_block(page: AdminPage) -> str:
+    url = _text(page.url, _UNKNOWN)
+    if not page.reachable:
+        reason = _clean(page.error) or "no reply"
+        return f"{url}\n  Not reachable ({reason})."
+    lines = [
+        url,
+        f"  Status  {page.status if page.status is not None else _UNKNOWN}",
+        f"  Title   {_text(page.title, _UNKNOWN)}",
+        f"  Server  {_text(page.server, _UNKNOWN)}",
+    ]
+    if page.plain_http:
+        lines.append("  Plain HTTP: a password typed here is not encrypted.")
+    else:
+        lines.append("  HTTPS: the page is encrypted.")
+    return "\n".join(lines)
+
+
+def _page_payload(page: AdminPage) -> dict:
+    return {
+        "url": _clean(page.url),
+        "port": page.port,
+        "reachable": page.reachable,
+        "plain_http": page.plain_http,
+        "status": page.status,
+        "title": _clean(page.title),
+        "server": _clean(page.server),
+        "error": _clean(page.error),
+    }
+
+
+def _router_meaning(result: RouterCheck) -> list[str]:
+    lines = ["What this means", ""]
+    if not result.admin_reachable:
+        lines.append(
+            "No admin page answered on ports 80, 443, or 8080. That is common. "
+            "The page may be turned off, or it may use a different port."
+        )
+    else:
+        lines.append(
+            "An admin page answered. Anyone on your home network can try to open it in a browser."
+        )
+        if result.plain_http_reachable:
+            lines.append(
+                "At least one page is plain HTTP. A password typed there can be read "
+                "on your network."
+            )
+        else:
+            lines.append("The page that answered uses HTTPS, so the login is encrypted.")
+    lines.append("")
+    lines.extend(_router_steps(result))
+    return lines
+
+
+def _router_steps(result: RouterCheck) -> list[str]:
+    lines = ["Safe next steps"]
+    if not result.admin_reachable:
+        lines.append("- Check the gateway with `homenet whoami-net`.")
+        lines.append("- Look up your router model for its admin address. Do not guess passwords.")
+    else:
+        lines.append("- Open the page only if you recognise it as your router.")
+        if result.plain_http_reachable:
+            https = any(page.reachable and not page.plain_http for page in result.pages)
+            if https:
+                lines.append(
+                    "- Prefer the HTTPS address when you sign in. "
+                    "Do not type the password on the HTTP page."
+                )
+            else:
+                lines.append("- Do not type the router password on a page that is not HTTPS.")
+        lines.append(
+            "- If the password is still the one printed on the router, change it after you sign in."
+        )
+    lines.append("- This check only requested the page. It did not log in.")
+    return lines
 
 
 def _dumps(payload: object) -> str:

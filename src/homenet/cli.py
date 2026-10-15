@@ -4,12 +4,19 @@
 ``whoami-net`` asks :mod:`homenet.core.netinfo` and prints them.
 ``devices``, ``device``, ``baseline``, and ``new-devices`` ask
 :mod:`homenet.core.devices` and :mod:`homenet.core.baseline`.
-The home network they scan comes from :func:`homenet.core.netinfo.detect`.
-This module does not spawn system commands itself. Core does.
+``ports`` asks :func:`homenet.core.ports.scan_ports` (top 100) and
+:func:`homenet.core.port_notes.notes_for_ports`.
+``services`` asks :func:`homenet.core.ports.scan_services` for one host.
+It does not pass ``allow_subnet``.
+``router`` asks :func:`homenet.core.router.check_router_admin`.
+``speed`` asks :func:`homenet.core.speed.measure_download`.
+The home network scans come from core. This module does not spawn commands.
 
 ``new-devices`` exits 0 when the live scan matches the saved snapshot,
 1 when a device is new, missing, changed, or has a different MAC address,
 and 2 when the command fails.
+``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
+on failure. Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
@@ -23,7 +30,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from homenet.core import baseline, checks, devices, netinfo
+from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
 from homenet.core.parser import Device, ParseError
@@ -39,11 +46,34 @@ from homenet.output import (
     format_doctor_json,
     format_error,
     format_error_json,
+    format_ports,
+    format_ports_json,
+    format_router,
+    format_router_json,
+    format_services,
+    format_services_json,
+    format_speed,
+    format_speed_json,
     format_whoami,
     format_whoami_json,
 )
 
 BANNER = "Only scan networks you own or have permission to scan."
+_USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
+
+
+class _JsonAwareParser(argparse.ArgumentParser):
+    """Usage errors stay plain text unless the user passed ``--json``."""
+
+    def __init__(self, *args, json_mode: bool = False, **kwargs) -> None:
+        self.json_mode = json_mode
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> None:
+        if self.json_mode:
+            print(format_error_json(message, _USAGE_HINT), file=sys.stderr)
+            self.exit(2)
+        super().error(message)
 
 
 class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -113,27 +143,31 @@ _COMMANDS: tuple[_Command, ...] = (
     _Command(
         "ports",
         "List open ports on one device",
-        "List the open ports on one device. An open port is a door a program "
-        "is listening on, such as a website or a printer.",
+        "List the open ports on one device and explain the risk in plain English. "
+        "An open port is a door a program is listening on, such as a website or a printer.",
         "homenet ports 192.168.1.1",
         scan=True,
         ip=True,
+        json=True,
     ),
     _Command(
         "services",
         "Show the services running on one device",
         "Name the services running on one device, such as a web server or "
-        "file sharing, when they can be identified.",
+        "file sharing, and show the program and version when they can be identified.",
         "homenet services 192.168.1.1",
         scan=True,
         ip=True,
+        json=True,
     ),
     _Command(
         "router",
         "Find your home router",
-        "Find the router that connects your home network to the internet and show its address.",
+        "Find the router that connects your home network to the internet "
+        "and check whether its admin page answers.",
         "homenet router",
         scan=True,
+        json=True,
     ),
     _Command(
         "baseline",
@@ -158,8 +192,10 @@ _COMMANDS: tuple[_Command, ...] = (
     _Command(
         "speed",
         "Check how fast your internet connection is",
-        "Measure how fast your connection to the internet is, in plain numbers.",
+        "Measure how fast your connection to the internet is, in plain numbers, "
+        "using a short download.",
         "homenet speed",
+        json=True,
     ),
     _Command(
         "doctor",
@@ -333,6 +369,126 @@ def _run_new_devices(args: argparse.Namespace) -> int:
     return 1 if report.has_changes else 0
 
 
+def _run_ports(args: argparse.Namespace) -> int:
+    _begin_scan(args)
+    target, code = _one_ipv4(args)
+    if target is None:
+        return code if code is not None else 1
+    try:
+        found = ports.scan_ports(target, top_ports=100)
+    except (NmapError, ParseError) as exc:
+        return _fail(args, exc)
+    device, code = _answered(args, found, target)
+    if device is None:
+        return code if code is not None else 1
+    notes = port_notes.notes_for_ports(device.ports)
+    if args.json:
+        print(format_ports_json(device, notes))
+    else:
+        print(format_ports(device, notes))
+    return 0
+
+
+def _run_services(args: argparse.Namespace) -> int:
+    """One host only. ``allow_subnet`` stays at its default of False."""
+    _begin_scan(args)
+    target, code = _one_ipv4(args)
+    if target is None:
+        return code if code is not None else 1
+    try:
+        found = ports.scan_services(target, top_ports=100)
+    except (NmapError, ParseError) as exc:
+        return _fail(args, exc)
+    device, code = _answered(args, found, target)
+    if device is None:
+        return code if code is not None else 1
+    if args.json:
+        print(format_services_json(device))
+    else:
+        print(format_services(device))
+    return 0
+
+
+def _run_router(args: argparse.Namespace) -> int:
+    _begin_scan(args)
+    try:
+        result = router.check_router_admin()
+    except NmapError as exc:
+        return _fail(args, exc)
+    if args.json:
+        print(format_router_json(result))
+    else:
+        print(format_router(result))
+    return 0
+
+
+def _run_speed(args: argparse.Namespace) -> int:
+    try:
+        result = speed.measure_download()
+    except speed.SpeedError as exc:
+        return _fail(args, exc)
+    if args.json:
+        print(format_speed_json(result))
+    else:
+        print(format_speed(result))
+    return 0
+
+
+def _one_ipv4(args: argparse.Namespace) -> tuple[str | None, int | None]:
+    """Return ``(address, None)`` or ``(None, exit code)`` after printing an error."""
+    raw = str(args.ip).strip()
+    if not raw or "/" in raw:
+        message = (
+            f"{raw} is a subnet, and {args.command} checks one device."
+            if "/" in raw
+            else "That is not a valid IP address."
+        )
+        return None, _fail_message(
+            args,
+            message,
+            "Use one IP address, for example 192.168.1.20.",
+        )
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return None, _fail_message(
+            args,
+            f"{raw} is not a valid IP address.",
+            "Use an address from `homenet devices`, for example 192.168.1.20.",
+        )
+    if address.version != 4:
+        return None, _fail_message(
+            args,
+            f"{address} is not an IPv4 address.",
+            "homenet checks IPv4 addresses. Use one from `homenet devices`.",
+        )
+    return str(address), None
+
+
+def _answered(
+    args: argparse.Namespace, found: list[Device], target: str
+) -> tuple[Device | None, int | None]:
+    device = _match_host(found, target)
+    if device is None:
+        return None, _fail_message(
+            args,
+            f"No device answered at {target}.",
+            "Check the address with `homenet devices`, and that the device is turned on.",
+        )
+    return device, None
+
+
+def _match_host(found: Sequence[Device], target: str) -> Device | None:
+    want = ipaddress.ip_address(target)
+    for device in found:
+        try:
+            if ipaddress.ip_address(device.ip) == want:
+                return device
+        except ValueError:
+            continue
+    return None
+
+
 def _begin_scan(args: argparse.Namespace) -> None:
     """Remind the user to scan only networks they own. JSON stays banner-free."""
     if getattr(args, "json", False):
@@ -410,12 +566,16 @@ _HANDLERS = {
     "whoami-net": _run_whoami,
     "devices": _run_devices,
     "device": _run_device,
+    "ports": _run_ports,
+    "services": _run_services,
+    "router": _run_router,
     "baseline": _run_baseline,
     "new-devices": _run_new_devices,
+    "speed": _run_speed,
 }
 
 
-def _add_command(subparsers, spec: _Command) -> None:
+def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
     parser = subparsers.add_parser(
         spec.name,
         help=spec.summary,
@@ -423,6 +583,7 @@ def _add_command(subparsers, spec: _Command) -> None:
         epilog=f"Example:\n  {spec.example}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.json_mode = json_mode
     if spec.ip:
         parser.add_argument(
             "ip",
@@ -442,9 +603,9 @@ def _add_command(subparsers, spec: _Command) -> None:
     parser.set_defaults(handler=_not_implemented, command_name=spec.name, scan=spec.scan)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
     """Build the ``homenet`` argument parser."""
-    parser = argparse.ArgumentParser(
+    parser = _JsonAwareParser(
         prog="homenet",
         description=(
             "Beginner-friendly tools for seeing what is on your home network.\n"
@@ -454,16 +615,19 @@ def build_parser() -> argparse.ArgumentParser:
             f"{BANNER}"
         ),
         formatter_class=_HelpFormatter,
+        json_mode=json_mode,
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.required = True
     for spec in _COMMANDS:
-        _add_command(subparsers, spec)
+        _add_command(subparsers, spec, json_mode)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code."""
-    parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    raw = list(argv) if argv is not None else None
+    json_mode = "--json" in (raw if raw is not None else sys.argv[1:])
+    parser = build_parser(json_mode=json_mode)
+    args = parser.parse_args(raw)
     return int(args.handler(args))
