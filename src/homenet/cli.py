@@ -7,11 +7,12 @@
 The home network they scan comes from :func:`homenet.core.netinfo.detect`.
 This module does not spawn system commands itself. Core does.
 
-``new-devices`` exits 0 when the live scan matches the saved snapshot.
-It exits 1 when a device is new, missing, changed, or has a different MAC
-address. A failure, such as a missing snapshot, also exits 1.
-``--json`` prints the shapes documented in :mod:`homenet.output` to stdout
-and sends errors to stderr, with no banner.
+``new-devices`` exits 0 when the live scan matches the saved snapshot,
+1 when a device is new, missing, changed, or has a different MAC address,
+and 2 when the command fails.
+``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
+with no banner. Errors go to stderr as a JSON object with ``error`` and
+``fix_hint``.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from homenet.output import (
     format_diff_json,
     format_doctor_json,
     format_error,
+    format_error_json,
     format_whoami,
     format_whoami_json,
 )
@@ -147,9 +149,8 @@ _COMMANDS: tuple[_Command, ...] = (
         "Compare the devices on your network now with the snapshot from "
         "`homenet baseline`, and list anything new.\n"
         "\n"
-        "Exit status is 0 when nothing changed, and 1 when a device is new, "
-        "missing, changed, or has a different MAC address. A failure, such as "
-        "a missing snapshot, also exits 1.",
+        "Exit status is 0 when nothing changed, 1 when a device is new, "
+        "missing, changed, or has a different MAC address, and 2 on error.",
         "homenet new-devices",
         scan=True,
         json=True,
@@ -315,15 +316,15 @@ def _run_baseline(args: argparse.Namespace) -> int:
 
 
 def _run_new_devices(args: argparse.Namespace) -> int:
-    """Exit 0 when nothing changed, 1 when the diff has changes or the command failed."""
+    """Exit 0 when nothing changed, 1 when something changed, and 2 on error."""
     _begin_scan(args)
     try:
         saved = baseline.load_baseline()
     except BaselineError as exc:
-        return _fail(args, exc)
+        return _fail(args, exc, code=2)
     found = _scan_home(args)
     if found is None:
-        return 1
+        return 2
     report = baseline.diff_devices(saved, found)
     if args.json:
         print(format_diff_json(report))
@@ -387,19 +388,21 @@ def _lookup_home(args: argparse.Namespace, ip: str) -> tuple[bool, Device | None
         return False, None
 
 
-def _fail(args: argparse.Namespace, exc: BaseException) -> int:
+def _fail(args: argparse.Namespace, exc: BaseException, code: int = 1) -> int:
     hint = getattr(exc, "hint", None)
-    return _fail_message(args, str(exc), hint if isinstance(hint, str) else None)
+    return _fail_message(args, str(exc), hint if isinstance(hint, str) else None, code)
 
 
-def _fail_message(args: argparse.Namespace, message: str, hint: str | None) -> int:
-    """Beginner-friendly error. ``--json`` sends it to stderr so stdout stays empty."""
-    text = format_error(message, hint)
+def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code: int = 1) -> int:
+    """Beginner-friendly error. ``--json`` writes ``{"error", "fix_hint"}`` to stderr.
+
+    ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
+    """
     if getattr(args, "json", False):
-        print(text, file=sys.stderr)
+        print(format_error_json(message, hint), file=sys.stderr)
     else:
-        print(text)
-    return 1
+        print(format_error(message, hint))
+    return code
 
 
 _HANDLERS = {
@@ -430,7 +433,7 @@ def _add_command(subparsers, spec: _Command) -> None:
         parser.add_argument(
             "--json",
             action="store_true",
-            help="Print JSON to stdout, with no banner. Errors go to stderr.",
+            help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
         )
     handler = _HANDLERS.get(spec.name)
     if handler is not None:

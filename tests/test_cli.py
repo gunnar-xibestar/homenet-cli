@@ -23,6 +23,7 @@ from homenet.output import (
     format_diff_json,
     format_doctor_json,
     format_error,
+    format_error_json,
     format_whoami,
     format_whoami_json,
 )
@@ -386,7 +387,7 @@ def _patch_lookup(monkeypatch, result):
 
 @pytest.mark.parametrize(
     "command",
-    ("whoami-net", "devices", "new-devices", "doctor"),
+    ("whoami-net", "devices", "device", "new-devices", "doctor"),
 )
 def test_json_flag_is_documented_on_the_commands_that_print_it(command, capsys):
     with pytest.raises(SystemExit) as exc:
@@ -395,12 +396,6 @@ def test_json_flag_is_documented_on_the_commands_that_print_it(command, capsys):
     out = capsys.readouterr().out
     assert "--json" in out
     assert "Errors go to stderr" in out
-
-
-def test_device_help_offers_json(capsys):
-    with pytest.raises(SystemExit):
-        main(["device", "--help"])
-    assert "--json" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command", ("baseline", "router", "speed", "ports", "services"))
@@ -414,8 +409,8 @@ def test_new_devices_help_documents_exit_codes(capsys):
     with pytest.raises(SystemExit):
         main(["new-devices", "--help"])
     out = capsys.readouterr().out
-    assert "Exit status is 0 when nothing changed" in out
-    assert "also exits 1" in out
+    assert "0 when nothing changed" in out
+    assert "and 2 on error" in out
 
 
 def test_devices_prints_the_banner_and_the_sweep(capsys, monkeypatch):
@@ -443,32 +438,41 @@ def test_devices_json_has_no_banner(capsys, monkeypatch):
     assert json.loads(captured.out)["devices"][0]["hostname"] == "x?[2Jy"
 
 
-def test_devices_error_shows_a_hint_without_a_traceback(capsys, monkeypatch):
+@pytest.mark.parametrize(
+    ("command", "hint"),
+    [
+        ("devices", "Try: sudo apt install nmap"),
+        ("device", "Try: sudo apt install nmap"),
+        ("baseline", "Check that the folder is writable."),
+    ],
+)
+def test_errors_show_a_hint_without_a_traceback(command, hint, capsys, monkeypatch):
     _patch_detect(monkeypatch, HOME)
-    _patch_sweep(
-        monkeypatch,
-        NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap"),
-    )
-    assert main(["devices"]) == 1
+    if command == "baseline":
+        _patch_sweep(monkeypatch, [LAPTOP])
+
+        def save(found, path=None, now=None):
+            raise BaselineError(f"Could not save the baseline to /tmp/baseline.json: {hint}", hint)
+
+        monkeypatch.setattr(baseline, "save_baseline", save)
+        argv = ["baseline"]
+        phrase = "Could not save the baseline"
+    else:
+        error = NmapNotFoundError("nmap is not installed.", hint)
+        argv = ["devices"] if command == "devices" else ["device", "192.168.1.10"]
+        if command == "devices":
+            _patch_sweep(monkeypatch, error)
+        else:
+            _patch_lookup(monkeypatch, error)
+        phrase = "nmap is not installed."
+    assert main(argv) == 1
     captured = capsys.readouterr()
-    assert captured.out.startswith(BANNER + "\n")
-    assert "nmap is not installed." in captured.out
-    assert "Fix: Try: sudo apt install nmap" in captured.out
+    assert phrase in captured.out
+    assert f"Fix: {hint}" in captured.out
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
     assert "NmapNotFoundError" not in captured.out
-
-
-def test_devices_json_error_goes_to_stderr(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, ParseError("nmap output was incomplete or corrupted.", "Try again."))
-    assert main(["devices", "--json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "Fix: Try again." in captured.err
-    assert BANNER not in captured.err
-    assert "Traceback" not in captured.err
-    assert "ParseError" not in captured.err
+    assert "BaselineError" not in captured.out
 
 
 def test_devices_explains_a_missing_home_network_without_scanning(capsys, monkeypatch):
@@ -522,19 +526,6 @@ def test_device_json_prints_one_object(capsys, monkeypatch):
     assert set(json.loads(captured.out)) == {"hostname", "ip", "mac", "ports", "vendor"}
 
 
-def test_device_scan_error_has_a_hint_and_no_traceback(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_lookup(
-        monkeypatch,
-        NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap"),
-    )
-    assert main(["device", "192.168.1.10"]) == 1
-    captured = capsys.readouterr()
-    assert "Fix: Try: sudo apt install nmap" in captured.out
-    assert "Traceback" not in captured.out
-    assert "NmapNotFoundError" not in captured.out
-
-
 def test_device_not_found_is_a_friendly_error(capsys, monkeypatch):
     _patch_detect(monkeypatch, HOME)
     _patch_lookup(monkeypatch, None)
@@ -586,106 +577,57 @@ def test_baseline_saves_the_sweep(capsys, monkeypatch, tmp_path):
     assert captured.err == ""
 
 
-def test_baseline_save_error_has_a_hint_and_no_traceback(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, [LAPTOP])
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [("same", 0), ("changed", 1), ("missing", 2), ("scan-error", 2)],
+)
+def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
+    current = [LAPTOP, PHONE] if case == "changed" else [LAPTOP]
+    calls = _patch_sweep(
+        monkeypatch,
+        NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap")
+        if case == "scan-error"
+        else current,
+    )
+    if case == "missing":
 
-    def save(found, path=None, now=None):
-        raise BaselineError(
-            "Could not save the baseline to /tmp/baseline.json: Permission denied",
-            "Check that the folder is writable.",
-        )
+        def load():
+            raise BaselineNotFoundError("No baseline saved yet.", "Run `homenet baseline` first.")
 
-    monkeypatch.setattr(baseline, "save_baseline", save)
-    assert main(["baseline"]) == 1
+        monkeypatch.setattr(baseline, "load_baseline", load)
+    else:
+        _patch_detect(monkeypatch, HOME)
+        monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
+    argv = ["new-devices", "--json"] if json_mode else ["new-devices"]
+    assert main(argv) == code
     captured = capsys.readouterr()
-    assert "Could not save the baseline" in captured.out
-    assert "Fix: Check that the folder is writable." in captured.out
     assert "Traceback" not in captured.out
-    assert "BaselineError" not in captured.out
-
-
-def test_new_devices_exits_0_when_nothing_changed(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, [LAPTOP])
-    monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
-    assert main(["new-devices"]) == 0
-    captured = capsys.readouterr()
-    report = diff_devices([LAPTOP], [LAPTOP])
-    assert captured.out == f"{BANNER}\n\n{format_diff(report)}\n"
-    assert "No changes since your saved snapshot." in captured.out
-    assert captured.err == ""
-
-
-def test_new_devices_exits_1_when_something_changed(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, [LAPTOP, PHONE])
-    monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
-    assert main(["new-devices"]) == 1
-    captured = capsys.readouterr()
-    report = diff_devices([LAPTOP], [LAPTOP, PHONE])
-    assert captured.out == f"{BANNER}\n\n{format_diff(report)}\n"
-    assert "New" in captured.out
-    assert "phone" in captured.out
-    assert captured.err == ""
-
-
-def test_new_devices_json_exits_with_the_diff(capsys, monkeypatch):
-    old = Device("192.168.1.5", "aa:aa:aa:aa:aa:aa", "Old", "printer")
-    current = Device("192.168.1.5", "bb:bb:bb:bb:bb:bb", "New", "phone")
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, [current])
-    monkeypatch.setattr(baseline, "load_baseline", lambda: [old])
-    assert main(["new-devices", "--json"]) == 1
-    captured = capsys.readouterr()
-    report = diff_devices([old], [current])
-    assert captured.out == format_diff_json(report) + "\n"
-    assert captured.err == ""
-    assert BANNER not in captured.out
-    loaded = json.loads(captured.out)
-    assert loaded["has_changes"] is True
-    assert loaded["mac_changed"][0]["after"]["hostname"] == "phone"
-    assert "spoof" not in captured.out
-
-
-def test_new_devices_json_exits_0_when_nothing_changed(capsys, monkeypatch):
-    _patch_detect(monkeypatch, HOME)
-    _patch_sweep(monkeypatch, [LAPTOP])
-    monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
-    assert main(["new-devices", "--json"]) == 0
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["has_changes"] is False
-    assert BANNER not in captured.out
-    assert captured.err == ""
-
-
-def test_new_devices_missing_baseline_does_not_scan(capsys, monkeypatch):
-    calls = _patch_sweep(monkeypatch, [LAPTOP])
-
-    def load():
-        raise BaselineNotFoundError("No baseline saved yet.", "Run `homenet baseline` first.")
-
-    monkeypatch.setattr(baseline, "load_baseline", load)
-    assert main(["new-devices"]) == 1
-    captured = capsys.readouterr()
-    assert calls == {}
-    assert "No baseline saved yet." in captured.out
-    assert "Fix: Run `homenet baseline` first." in captured.out
-    assert "Traceback" not in captured.out
-    assert "BaselineNotFoundError" not in captured.out
-
-
-def test_new_devices_json_missing_baseline_goes_to_stderr(capsys, monkeypatch):
-    def load():
-        raise BaselineNotFoundError("No baseline saved yet.", "Run `homenet baseline` first.")
-
-    monkeypatch.setattr(baseline, "load_baseline", load)
-    assert main(["new-devices", "--json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "Fix: Run `homenet baseline` first." in captured.err
-    assert BANNER not in captured.err
     assert "Traceback" not in captured.err
+    if case == "missing":
+        assert calls == {}
+    if code == 2:
+        assert "BaselineNotFoundError" not in captured.out + captured.err
+        assert "NmapNotFoundError" not in captured.out + captured.err
+        if json_mode:
+            assert captured.out == ""
+            assert BANNER not in captured.err
+            err = json.loads(captured.err)
+            assert set(err) == {"error", "fix_hint"}
+            assert err["fix_hint"]
+        else:
+            assert captured.err == ""
+            assert captured.out.startswith(BANNER + "\n")
+            assert "Fix:" in captured.out
+        return
+    report = diff_devices([LAPTOP], current)
+    assert captured.err == ""
+    if json_mode:
+        assert captured.out == format_diff_json(report) + "\n"
+        assert json.loads(captured.out)["has_changes"] is (code == 1)
+        assert BANNER not in captured.out
+    else:
+        assert captured.out == f"{BANNER}\n\n{format_diff(report)}\n"
 
 
 def test_whoami_json_prints_netinfo(capsys, monkeypatch):
@@ -698,43 +640,39 @@ def test_whoami_json_prints_netinfo(capsys, monkeypatch):
     assert "This computer" not in captured.out
 
 
-def test_whoami_json_error_goes_to_stderr(capsys, monkeypatch):
-    error = NetInfoError("No default route found.", "Connect to Wi-Fi or Ethernet and try again.")
-    _patch_detect(monkeypatch, error)
-    assert main(["whoami-net", "--json"]) == 1
+@pytest.mark.parametrize(
+    ("command", "message", "hint"),
+    [
+        (
+            "whoami-net",
+            "No default route\x1b found.",
+            "Connect to Wi-Fi or Ethernet and try again.",
+        ),
+        ("devices", "nmap output was incomplete or corrupted.", None),
+        ("new-devices", "No baseline saved yet.", "Run `homenet baseline` first."),
+    ],
+)
+def test_json_errors_go_to_stderr(command, message, hint, capsys, monkeypatch):
+    if command == "whoami-net":
+        _patch_detect(monkeypatch, NetInfoError(message, hint))
+    elif command == "devices":
+        _patch_detect(monkeypatch, HOME)
+        _patch_sweep(monkeypatch, ParseError(message, hint))
+    else:
+
+        def load():
+            raise BaselineNotFoundError(message, hint)
+
+        monkeypatch.setattr(baseline, "load_baseline", load)
+    code = 2 if command == "new-devices" else 1
+    assert main([command, "--json"]) == code
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == format_error(str(error), error.hint) + "\n"
+    assert captured.err == format_error_json(message, hint) + "\n"
+    assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+    assert "\x1b" not in captured.err
+    assert BANNER not in captured.err
     assert "Traceback" not in captured.err
-
-
-def test_doctor_json_exits_0_when_checks_pass(capsys, monkeypatch):
-    results = [
-        CheckResult("nmap", True, "nmap 7.95", severity="ok"),
-        CheckResult("ip", True, "ip 6.1.0", severity="ok"),
-    ]
-    _patch_checks(monkeypatch, results)
-    assert main(["doctor", "--json"]) == 0
-    captured = capsys.readouterr()
-    assert captured.out == format_doctor_json(results) + "\n"
-    assert captured.err == ""
-    assert json.loads(captured.out)["ok"] is True
-    assert [item["name"] for item in json.loads(captured.out)["checks"]] == ["nmap", "ip"]
-
-
-def test_doctor_json_exits_1_when_an_error_check_fails(capsys, monkeypatch):
-    results = [
-        CheckResult("nmap", False, "nmap is not installed", "sudo apt install nmap", "error"),
-        CheckResult("privileges", False, "normal user", "Re-run with sudo", "warning"),
-    ]
-    _patch_checks(monkeypatch, results)
-    assert main(["doctor", "--json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    loaded = json.loads(captured.out)
-    assert loaded["ok"] is False
-    assert loaded["checks"][0]["fix_hint"] == "sudo apt install nmap"
-    assert loaded["checks"][1]["severity"] == "warning"
 
 
 def test_doctor_cleans_network_text_in_the_plain_report(capsys, monkeypatch):
@@ -750,8 +688,49 @@ def test_doctor_cleans_network_text_in_the_plain_report(capsys, monkeypatch):
     assert "Fix: Check wlan0?]0;x?" in out
 
 
-def test_doctor_json_treats_warnings_as_success(capsys, monkeypatch):
-    results = [CheckResult("privileges", False, "normal user", "Re-run with sudo", "warning")]
+@pytest.mark.parametrize(
+    ("results", "code", "ok"),
+    [
+        (
+            [
+                CheckResult("nmap", True, "nmap 7.95", severity="ok"),
+                CheckResult("ip", True, "ip 6.1.0", severity="ok"),
+            ],
+            0,
+            True,
+        ),
+        (
+            [CheckResult("privileges", False, "user on eth0\x1b", "Re-run", "warning")],
+            0,
+            True,
+        ),
+        (
+            [
+                CheckResult("nmap", False, "missing", "sudo apt install nmap", "error"),
+                CheckResult("privileges", False, "normal user", "Re-run with sudo", "warning"),
+            ],
+            1,
+            False,
+        ),
+    ],
+    ids=("pass", "warning", "error"),
+)
+def test_doctor_json(results, code, ok, capsys, monkeypatch):
     _patch_checks(monkeypatch, results)
-    assert main(["doctor", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert main(["doctor", "--json"]) == code
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == format_doctor_json(results) + "\n"
+    loaded = json.loads(captured.out)
+    assert loaded["ok"] is ok
+    assert "\x1b" not in captured.out
+    if code == 0 and len(results) == 2:
+        assert [item["name"] for item in loaded["checks"]] == ["nmap", "ip"]
+    if any(result.severity == "warning" and not result.ok for result in results):
+        warning = next(item for item in loaded["checks"] if item["severity"] == "warning")
+        assert warning["fix_hint"]
+    if code == 1:
+        assert loaded["checks"][0]["fix_hint"] == "sudo apt install nmap"
+        assert loaded["checks"][1]["severity"] == "warning"
+    if any("\x1b" in result.detail for result in results):
+        assert loaded["checks"][0]["detail"] == "user on eth0?"
