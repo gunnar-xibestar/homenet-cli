@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from homenet.cli import BANNER, main
-from homenet.core import baseline, checks, devices, netinfo
+from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError, BaselineNotFoundError, diff_devices
 from homenet.core.checks import CheckResult
 from homenet.core.netinfo import NetInfo, NetInfoError
-from homenet.core.parser import Device, ParseError
-from homenet.core.runner import NmapNotFoundError
+from homenet.core.parser import Device, ParseError, Port
+from homenet.core.router import AdminPage, RouterCheck
+from homenet.core.runner import NmapNotFoundError, TargetNotAllowedError
+from homenet.core.speed import SpeedError, SpeedResult
 from homenet.output import (
     format_device,
     format_device_json,
@@ -24,6 +26,14 @@ from homenet.output import (
     format_doctor_json,
     format_error,
     format_error_json,
+    format_ports,
+    format_ports_json,
+    format_router,
+    format_router_json,
+    format_services,
+    format_services_json,
+    format_speed,
+    format_speed_json,
     format_whoami,
     format_whoami_json,
 )
@@ -68,7 +78,17 @@ EXAMPLES = {
     "speed": "homenet speed",
     "doctor": "homenet doctor",
 }
-JSON_COMMANDS = {"whoami-net", "devices", "device", "new-devices", "doctor"}
+JSON_COMMANDS = {
+    "whoami-net",
+    "devices",
+    "device",
+    "ports",
+    "services",
+    "router",
+    "new-devices",
+    "speed",
+    "doctor",
+}
 
 
 @pytest.mark.parametrize("command", [None, *EXAMPLES])
@@ -85,23 +105,10 @@ def test_help(command, capsys):
     if command == "new-devices":
         for code in ("0 when nothing changed", "1 when a device is new", "and 2 on error"):
             assert code in out
-
-
-@pytest.mark.parametrize(
-    ("argv", "banner"),
-    [
-        (["router"], True),
-        (["ports", "192.168.1.1"], True),
-        (["services", "192.168.1.1"], True),
-        (["speed"], False),
-    ],
-    ids=["router", "ports", "services", "speed"],
-)
-def test_stub_commands_are_not_implemented(argv, banner, capsys):
-    assert main(argv) == 1
-    out = capsys.readouterr().out
-    assert f"{argv[0]} is not implemented yet." in out
-    assert (BANNER in out) is banner
+    if command == "services":
+        assert "--subnet" not in out and "allow_subnet" not in out
+    if command == "speed":
+        assert "Cloudflare" in out and "speed.cloudflare.com" in out
 
 
 @pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
@@ -532,3 +539,229 @@ def test_doctor_json(results, code, ok, capsys, monkeypatch):
         assert loaded["checks"][1]["severity"] == "warning"
     if any("\x1b" in result.detail for result in results):
         assert loaded["checks"][0]["detail"] == "user on eth0?"
+
+
+_OTHER = Device("192.168.1.50", None, None, "phone", [Port(9, "tcp", "open", "discard")])
+_OPEN = Device(
+    "192.168.1.1",
+    None,
+    None,
+    "r\x1bouter",
+    [
+        Port(80, "tcp", "open", "http"),
+        Port(22, "tcp", "open", "ssh", "Drop\x1bbear", "2022.83"),
+        Port(443, "tcp", "filtered"),
+    ],
+)
+_QUIET = Device("192.168.1.20", None, None, None, [Port(22, "tcp", "closed", "ssh")])
+_ROUTER = RouterCheck(
+    "192.168.1.1",
+    [
+        AdminPage("http://192.168.1.1/", 80, True, True, 200, "Router\x1b Login", "lighttpd"),
+        AdminPage("https://192.168.1.1/", 443, True, False, 401, None, None),
+    ],
+)
+_ROUTER_QUIET = RouterCheck(
+    "192.168.1.1",
+    [AdminPage("http://192.168.1.1/", 80, False, True, error="connection refused")],
+)
+_SPEED = SpeedResult(8.0, 1_000_000, 1.0, "https://speed.cloudflare.com/__down?bytes=1000000\x1b")
+_COMMANDS = ("ports", "services", "router", "speed")
+
+
+def _patch_command(monkeypatch, command, result):
+    calls = {}
+
+    def scan(target=None, **kwargs):
+        calls["target"] = target
+        calls["kwargs"] = kwargs
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def check(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def measure(**kwargs):
+        calls["kwargs"] = kwargs
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    if command == "ports":
+        monkeypatch.setattr(ports, "scan_ports", scan)
+    elif command == "services":
+        monkeypatch.setattr(ports, "scan_services", scan)
+    elif command == "router":
+        monkeypatch.setattr(router, "check_router_admin", check)
+    else:
+        monkeypatch.setattr(speed, "measure_download", measure)
+    return calls
+
+
+def _render(command, result, json_mode):
+    if command == "ports":
+        notes = port_notes.notes_for_ports(result.ports)
+        return format_ports_json(result, notes) if json_mode else format_ports(result, notes)
+    if command == "services":
+        return format_services_json(result) if json_mode else format_services(result)
+    if command == "router":
+        return format_router_json(result) if json_mode else format_router(result)
+    return format_speed_json(result) if json_mode else format_speed(result)
+
+
+def _assert_call(command, calls):
+    if command in ("ports", "services"):
+        assert calls["target"] == "192.168.1.1"
+        assert calls["kwargs"] == {"top_ports": 100}
+        assert "allow_subnet" not in calls["kwargs"]
+    elif command == "router":
+        assert calls["args"] == () and calls["kwargs"] == {}
+    else:
+        assert calls == {"kwargs": {}}
+
+
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize("command", _COMMANDS)
+def test_command_success(command, json_mode, capsys, monkeypatch):
+    result = {
+        "ports": [_OPEN, _OTHER],
+        "services": [_OPEN, _OTHER],
+        "router": _ROUTER,
+        "speed": _SPEED,
+    }[command]
+    shown = _OPEN if command in ("ports", "services") else result
+    calls = _patch_command(monkeypatch, command, result)
+    argv = {
+        "ports": ["ports", "192.168.1.1"],
+        "services": ["services", "192.168.1.1"],
+        "router": ["router"],
+        "speed": ["speed"],
+    }[command]
+    assert main([*argv, "--json"] if json_mode else argv) == 0
+    captured = capsys.readouterr()
+    rendered = _render(command, shown, json_mode)
+    if json_mode or command == "speed":
+        assert captured.out == rendered + "\n"
+        assert BANNER not in captured.out
+    else:
+        assert captured.out == f"{BANNER}\n\n{rendered}\n"
+    assert captured.err == ""
+    assert "\x1b" not in captured.out
+    if command == "speed" and not json_mode:
+        assert "Cloudflare" in captured.out and "speed.cloudflare.com" in captured.out
+    _assert_call(command, calls)
+
+
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize(
+    ("command", "phrase"),
+    [
+        ("ports", "No open ports were found."),
+        ("services", "No running services were identified."),
+        ("router", "No admin page answered"),
+    ],
+)
+def test_quiet_result_still_succeeds(command, phrase, json_mode, capsys, monkeypatch):
+    result = _ROUTER_QUIET if command == "router" else [_QUIET]
+    shown = _ROUTER_QUIET if command == "router" else _QUIET
+    _patch_command(monkeypatch, command, result)
+    argv = ["router"] if command == "router" else [command, "192.168.1.20"]
+    assert main([*argv, "--json"] if json_mode else argv) == 0
+    captured = capsys.readouterr()
+    rendered = _render(command, shown, json_mode)
+    if json_mode:
+        assert captured.out == rendered + "\n"
+        assert BANNER not in captured.out
+    else:
+        assert captured.out == f"{BANNER}\n\n{rendered}\n"
+        assert phrase in captured.out
+
+
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize("command", _COMMANDS)
+def test_command_errors(command, json_mode, capsys, monkeypatch):
+    if command == "speed":
+        argv, error = (
+            ["speed"],
+            SpeedError("Could not measure your internet speed.", "Check the internet."),
+        )
+    elif command == "router":
+        argv, error = (
+            ["router"],
+            TargetNotAllowedError(
+                "Could not detect your router (default gateway).",
+                "Check you are connected (see `homenet whoami-net`).",
+            ),
+        )
+    else:
+        argv, error = (
+            [command, "192.168.1.1"],
+            NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap"),
+        )
+    _patch_command(monkeypatch, command, error)
+    assert main([*argv, "--json"] if json_mode else argv) == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    assert type(error).__name__ not in captured.out + captured.err
+    if json_mode:
+        assert captured.out == ""
+        assert captured.err == format_error_json(str(error), error.hint) + "\n"
+        assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+        assert BANNER not in captured.err
+    else:
+        assert f"Fix: {error.hint}" in captured.out
+        assert (BANNER in captured.out) is (command != "speed")
+
+
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize("command", ("ports", "services"))
+@pytest.mark.parametrize(
+    ("ip", "phrase"),
+    [
+        ("192.168.1.0/24", "is a subnet"),
+        ("router.lan", "not a valid IP address"),
+        ("2001:db8::1", "not an IPv4 address"),
+    ],
+)
+def test_host_commands_reject_a_bad_target(command, ip, phrase, json_mode, capsys, monkeypatch):
+    calls = _patch_command(monkeypatch, command, [_OPEN])
+    assert main([command, ip, "--json"] if json_mode else [command, ip]) == 1
+    captured = capsys.readouterr()
+    assert calls == {}
+    assert "Traceback" not in captured.out + captured.err
+    blob = captured.err if json_mode else captured.out
+    assert phrase in blob and ("fix_hint" in blob if json_mode else "Fix:" in blob)
+    if json_mode:
+        assert captured.out == ""
+        assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+
+
+@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
+@pytest.mark.parametrize("command", ("ports", "services"))
+def test_host_commands_say_when_nothing_answered(command, json_mode, capsys, monkeypatch):
+    _patch_command(monkeypatch, command, [])
+    assert main([command, "192.168.1.9", "--json"] if json_mode else [command, "192.168.1.9"]) == 1
+    captured = capsys.readouterr()
+    assert "No device answered at 192.168.1.9." in (captured.err if json_mode else captured.out)
+    if json_mode:
+        assert captured.out == ""
+        assert set(json.loads(captured.err)) == {"error", "fix_hint"}
+    else:
+        assert "Fix:" in captured.out and BANNER in captured.out
+
+
+def test_json_usage_error_prints_an_error_object(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["ports", "--json"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    loaded = json.loads(captured.err)
+    assert set(loaded) == {"error", "fix_hint"}
+    assert "required" in loaded["error"] and loaded["fix_hint"]
+    assert "usage:" not in captured.err and "Traceback" not in captured.err

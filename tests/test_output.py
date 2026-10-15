@@ -7,6 +7,9 @@ import pytest
 from homenet.core.baseline import diff_devices, load_baseline
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port, parse_nmap_xml
+from homenet.core.port_notes import notes_for_ports
+from homenet.core.router import AdminPage, RouterCheck
+from homenet.core.speed import SpeedResult
 from homenet.output import (
     format_device,
     format_device_json,
@@ -15,6 +18,14 @@ from homenet.output import (
     format_diff,
     format_diff_json,
     format_error,
+    format_ports,
+    format_ports_json,
+    format_router,
+    format_router_json,
+    format_services,
+    format_services_json,
+    format_speed,
+    format_speed_json,
     format_whoami,
     format_whoami_json,
 )
@@ -462,3 +473,202 @@ def test_diff_json_has_changes_is_false_when_nothing_changed():
     assert loaded["missing"] == []
     assert loaded["changed"] == []
     assert loaded["mac_changed"] == []
+
+
+def test_format_ports_explains_open_ports_and_skips_the_rest():
+    device = Device(
+        "192.168.1.1",
+        None,
+        "TP-Link",
+        "router.lan",
+        [
+            Port(23, "tcp", "open", "telnet"),
+            Port(443, "tcp", "filtered"),
+            Port(53, "tcp", "open", "domain"),
+        ],
+    )
+    text = format_ports(device, notes_for_ports(device.ports))
+    assert "443" not in text
+    assert "filtered" not in text
+    assert "23/tcp  Telnet  risk: high" in text
+    assert "Unencrypted remote login" in text
+    assert "53/tcp  DNS  risk: low" in text
+    assert "Name lookups" in text
+    assert text.startswith("Open ports on router.lan (192.168.1.1)")
+    assert "2 open ports." in text
+    assert text.endswith("Low means this is normal on a home device.")
+
+
+def test_format_ports_says_when_nothing_is_open():
+    device = Device("192.168.1.20", None, None, None, [])
+    text = format_ports(device, [])
+    assert text.startswith("Open ports on 192.168.1.20")
+    assert "No open ports were found." in text
+    assert "risk:" not in text
+
+
+def test_ports_json_cleans_device_strings_and_sorts():
+    device = Device(
+        "192.168.1.9\x1b[2J",
+        None,
+        None,
+        "x\x1b[2Jy",
+        [
+            Port(80, "tc\x1bp", "open", "ht\x1btp"),
+            Port(22, "tcp", "open", "ssh"),
+        ],
+    )
+    text = format_ports_json(device, notes_for_ports(device.ports))
+    assert "\x1b" not in text
+    loaded = json.loads(text)
+    assert text == json.dumps(loaded, indent=2, sort_keys=True, ensure_ascii=True)
+    assert loaded["hostname"] == "x?[2Jy"
+    assert loaded["ip"] == "192.168.1.9?[2J"
+    assert [port["number"] for port in loaded["ports"]] == [22, 80]
+    assert loaded["ports"][1]["protocol"] == "tc?p"
+    assert loaded["ports"][1]["service"] == "ht?tp"
+    assert loaded["ports"][1]["name"] == "ht?tp"
+    assert loaded["ports"][0]["name"] == "SSH"
+    assert loaded["ports"][0]["risk"] == "medium"
+    assert set(loaded["ports"][0]) == {
+        "name",
+        "note",
+        "number",
+        "protocol",
+        "risk",
+        "service",
+        "state",
+    }
+
+
+def test_format_services_shows_product_and_version():
+    device = Device(
+        "192.168.1.1",
+        None,
+        None,
+        "router.lan",
+        [
+            Port(22, "tcp", "open", "ssh", "Dropbear sshd", "2022.83"),
+            Port(80, "tcp", "open", "http", "lighttpd", None),
+            Port(23, "tcp", "closed", "telnet"),
+        ],
+    )
+    text = format_services(device)
+    assert "Dropbear sshd" in text
+    assert "2022.83" in text
+    assert "lighttpd" in text
+    assert "unknown" in text
+    assert "23" not in text
+    assert "Product is the program." in text
+    hostile = format_services(
+        Device(
+            "10.0.0.1",
+            None,
+            None,
+            "n\x1bame",
+            [Port(22, "tcp", "open", "ssh", "Drop\x1bbear", "1\x1b.0")],
+        )
+    )
+    assert "\x1b" not in hostile
+    assert "Drop?bear" in hostile
+    assert "1?.0" in hostile
+    assert "n?ame" in hostile
+
+
+def test_services_json_nulls_missing_product_and_version():
+    device = Device(
+        "192.168.1.1",
+        None,
+        None,
+        "  ",
+        [Port(80, "tcp", "open", "http", None, None)],
+    )
+    loaded = json.loads(format_services_json(device))
+    assert loaded == {
+        "hostname": None,
+        "ip": "192.168.1.1",
+        "services": [
+            {
+                "number": 80,
+                "product": None,
+                "protocol": "tcp",
+                "service": "http",
+                "state": "open",
+                "version": None,
+            }
+        ],
+    }
+
+
+def test_format_router_plain_http_and_quiet_router():
+    reached = RouterCheck(
+        "192.168.1.1",
+        [
+            AdminPage("http://192.168.1.1/", 80, True, True, 200, "Router Login", "lighttpd"),
+            AdminPage("https://192.168.1.1/", 443, True, False, 401, None, None),
+            AdminPage("http://192.168.1.1:8080/", 8080, False, True, error="timed out"),
+        ],
+    )
+    text = format_router(reached)
+    assert "Gateway     192.168.1.1" in text
+    assert "Plain HTTP  yes" in text
+    assert "not encrypted" in text
+    assert "Prefer the HTTPS address" in text
+    assert "did not log in" in text
+    assert "Not reachable (timed out)." in text
+    quiet = RouterCheck(
+        "10.0.0.1",
+        [AdminPage("http://10.0.0.1/", 80, False, True, error="connection refused")],
+    )
+    quiet_text = format_router(quiet)
+    assert "No admin page answered" in quiet_text
+    assert "Do not guess passwords." in quiet_text
+    assert "Admin page  not reachable" in quiet_text
+
+
+def test_router_json_cleans_strings_and_keeps_bools():
+    result = RouterCheck(
+        "192.168.1.1\x1b",
+        [AdminPage("http://gw/\x1b", 80, True, True, 200, "Hi\x1b", None, error=None)],
+    )
+    text = format_router_json(result)
+    assert "\x1b" not in text
+    loaded = json.loads(text)
+    assert loaded["admin_reachable"] is True
+    assert loaded["plain_http_reachable"] is True
+    assert loaded["gateway"] == "192.168.1.1?"
+    page = loaded["pages"][0]
+    assert page["title"] == "Hi?"
+    assert page["server"] is None
+    assert page["url"] == "http://gw/?"
+    assert page["status"] == 200
+    assert page["error"] is None
+    assert set(page) == {
+        "error",
+        "plain_http",
+        "port",
+        "reachable",
+        "server",
+        "status",
+        "title",
+        "url",
+    }
+
+
+def test_format_speed_uses_megabits():
+    result = SpeedResult(8.0, 1_000_000, 1.0, "https://speed.cloudflare.com/__down?bytes=1000000")
+    text = format_speed(result)
+    assert "Download  8.00 Mb/s" in text
+    assert "Sample    1000000 bytes" in text
+    assert "Time      1.000 seconds" in text
+    assert "not a full speed test" in text
+    assert "Cloudflare" in text
+    assert "speed.cloudflare.com" in text
+    raw = format_speed_json(SpeedResult(8.0, 1000, 0.5, "https://example.test/\x1b"))
+    assert "\x1b" not in raw
+    assert json.loads(raw) == {
+        "bytes": 1000,
+        "download_mbps": 8.0,
+        "seconds": 0.5,
+        "url": "https://example.test/?",
+    }
