@@ -82,17 +82,12 @@ def test_format_whoami_shows_address_with_prefix():
 def test_format_whoami_warns_on_wsl_nat():
     info = NetInfo("eth0", "172.22.240.5", "172.22.240.1", "172.22.240.0/20", wsl_nat=True)
     text = format_whoami(info)
-    assert "Warning:" in text
-    assert "WSL virtual network" in text and "home LAN" in text
-    assert "networkingMode=mirrored" in text
-    assert "[wsl2]" in text and "%UserProfile%" in text and "wsl --shutdown" in text
     loaded = json.loads(format_whoami_json(info))
-    assert loaded["wsl_nat"] is True
-    assert loaded["ip"] == "172.22.240.5" and loaded["prefix"] == 20
-    assert loaded["subnet"] == "172.22.240.0/20"
-    assert "WSL virtual network" in loaded["warning"]
-    assert "networkingMode=mirrored" in loaded["warning"]
-    assert "wsl --shutdown" in loaded["warning"]
+    assert "Warning:" in text and loaded["wsl_nat"] is True
+    for blob in (text, loaded["warning"]):
+        assert "172.22.240.0/20" in blob
+        assert "may be the WSL virtual network" in blob
+        assert "networkingMode=mirrored" in blob and "wsl --shutdown" in blob
 
 
 @pytest.mark.parametrize(

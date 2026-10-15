@@ -30,16 +30,24 @@ def is_wsl(
     """True when this process looks like a WSL distro.
 
     ``WSL_DISTRO_NAME`` (non-empty) is enough. Otherwise ``microsoft`` anywhere
-    in ``/proc/version`` counts, in any case. A missing file is not WSL.
+    in ``/proc/version`` counts, in any case. A readable
+    ``/proc/sys/fs/binfmt_misc/WSLInterop`` counts too. A missing file is not WSL.
     """
     env = os.environ if environ is None else environ
     if (env.get("WSL_DISTRO_NAME") or "").strip():
         return True
+    read = read_text or _read_text
     try:
-        version = (read_text or _read_text)("/proc/version")
+        version = read("/proc/version")
+    except OSError:
+        version = ""
+    if "microsoft" in version.lower():
+        return True
+    try:
+        read("/proc/sys/fs/binfmt_misc/WSLInterop")
     except OSError:
         return False
-    return "microsoft" in version.lower()
+    return True
 
 
 def in_wsl_nat(address: str | None) -> bool:
@@ -64,7 +72,7 @@ def wsl_nat_active(
 ) -> bool:
     """True when this is WSL and an address is in the WSL 2 NAT range.
 
-    Addresses outside that range return False without reading ``/proc/version``.
+    Addresses outside that range return False without reading WSL files.
     """
     if not any(in_wsl_nat(item) for item in addresses):
         return False
@@ -72,10 +80,12 @@ def wsl_nat_active(
 
 
 def wsl_nat_detail(network: str | None = None) -> str:
-    """Warning that scans see the WSL virtual network, not the home LAN."""
-    if network:
-        return (
-            f"Active network {network} is the WSL virtual network, not your home LAN. "
-            "Scans see that virtual network, not the home LAN."
-        )
-    return "Scans see the WSL virtual network, not the home LAN."
+    """Warning that this may be the WSL virtual network, not the home LAN.
+
+    Mirrored WSL on a real 172.16/12 LAN looks the same, so this is not certain.
+    """
+    where = f"Active network {network}" if network else "This"
+    return (
+        f"{where} may be the WSL virtual network, not your home LAN. "
+        "Scans from here see that virtual network, not the home LAN."
+    )

@@ -8,7 +8,7 @@ Input shapes for Net Core to match:
 * :func:`format_whoami` takes one :class:`homenet.core.netinfo.NetInfo`.
   Fields it reads: ``interface``, ``ip``, ``gateway``, ``subnet``, ``wsl_nat``.
   ``NetInfo`` has no MAC address, so this view does not show one.
-  When ``wsl_nat`` is true, the plain view adds a warning that scans see the
+  When ``wsl_nat`` is true, the plain view adds a warning that this may be the
   WSL virtual network, not the home LAN.
 * :func:`format_devices` takes a sequence of :class:`homenet.core.parser.Device`
   (the host list for ``homenet devices``).
@@ -56,7 +56,7 @@ result (quotes, backslashes, and non-ASCII).
 ``ip`` is the address. ``prefix`` is the integer length the plain view shows
 after it (``address/prefix``). ``prefix`` is null when that line has no prefix.
 ``wsl_nat`` is true when the active address is inside WSL 2's NAT range.
-``warning`` then explains that scans see the virtual network, not the home LAN,
+``warning`` then says this may be the WSL virtual network, not the home LAN,
 and how to switch WSL to mirrored networking. Otherwise ``warning`` is null.
 
 ``homenet doctor --json``::

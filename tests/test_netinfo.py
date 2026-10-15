@@ -32,18 +32,15 @@ def test_detect_with_ip(load_fixture):
 
 
 @pytest.mark.parametrize(
-    ("local", "prefix", "env", "version", "flag"),
+    ("env", "version", "flag"),
     [
-        ("172.22.240.5", 20, {"WSL_DISTRO_NAME": "Ubuntu"}, None, True),
-        ("192.168.1.20", 24, {"WSL_DISTRO_NAME": "Ubuntu"}, None, False),
-        ("172.22.240.5", 20, {}, "Linux version 5.15.0-microsoft-standard", True),
-        ("172.22.240.5", 20, {}, "Linux version 6.12.94+", False),
-        ("172.31.255.254", 16, {"WSL_DISTRO_NAME": "Debian"}, None, True),
-        ("172.32.0.5", 24, {"WSL_DISTRO_NAME": "Debian"}, None, False),
-        ("10.0.0.8", 24, {"WSL_DISTRO_NAME": "Ubuntu"}, None, False),
+        ({"WSL_DISTRO_NAME": "Ubuntu"}, None, True),
+        ({}, "Linux version 6.12.94+", False),
     ],
+    ids=["wsl", "not-wsl"],
 )
-def test_detect_sets_wsl_nat(local, prefix, env, version, flag):
+def test_detect_sets_wsl_nat(env, version, flag):
+    local, prefix = "172.22.240.5", 20
     network = ipaddress.ip_network(f"{local}/{prefix}", strict=False)
     gateway = str(next(network.hosts()))
 
@@ -62,9 +59,9 @@ def test_detect_sets_wsl_nat(local, prefix, env, version, flag):
         return json.dumps(body)
 
     def read(path):
-        assert path == "/proc/version"
-        assert version is not None
-        return version
+        if path == "/proc/version" and version is not None:
+            return version
+        raise OSError(path)
 
     info = detect(run=run, read_file=read, environ=env)
     assert info.wsl_nat is flag

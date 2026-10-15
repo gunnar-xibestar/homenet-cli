@@ -96,7 +96,7 @@ You should see **This computer on your home network**, then four rows:
 - **Gateway**, usually your home router
 - **Home network**, the group of addresses your devices share (for example `192.168.1.0/24`)
 
-This reads your own route with `ip`. A missing value is `not available`. Exit 0 when the route can be read. If you are not connected, it tells you to connect to Wi-Fi or Ethernet. On WSL 2's virtual network it adds a warning that scans see that network, not the home LAN. The command still exits 0.
+This reads your own route with `ip`. A missing value is `not available`. Exit 0 when the route can be read. If you are not connected, it tells you to connect to Wi-Fi or Ethernet. On a 172.16/12 address inside WSL it adds a warning that this may be the WSL virtual network, not the home LAN. The command still exits 0.
 
 ### `homenet devices`
 
@@ -167,7 +167,7 @@ sudo "$(command -v homenet)" devices
 
 ### WSL 2 shows a virtual network, not the home LAN
 
-WSL 2 normally puts Linux on a private network inside `172.16.0.0/12`. `homenet whoami-net` and `homenet doctor` warn when they see that. Scans then list the virtual network, not the phones and computers on your home LAN. The warning does not change the exit code.
+WSL 2 normally puts Linux on a private network inside `172.16.0.0/12`. `homenet whoami-net` and `homenet doctor` warn that this may be the WSL virtual network, not the home LAN. A real LAN in that range can look the same, including WSL in mirrored mode. The warning does not change the exit code.
 
 To use the same network as Windows, add this to `%UserProfile%\.wslconfig` (that file is on the Windows side):
 

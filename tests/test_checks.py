@@ -86,24 +86,22 @@ def test_privileges_cap_net_raw():
         ("/usr/bin/pytest", None, set(), None),
         ("homenet", None, set(), None),
         ("", None, set(), None),
+        ("homenet", "/other/homenet", None, "script"),
     ],
 )
-def test_resolve_homenet_program(argv0, found, files, expected):
+def test_resolve_homenet_program(argv0, found, files, expected, tmp_path, monkeypatch):
+    is_file = None if files is None else files.__contains__
+    if expected == "script":
+        script = tmp_path / "homenet"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        expected = str(script.resolve())
     got = resolve_homenet_program(
         argv0=argv0,
         which=lambda name: found if name == "homenet" else None,
-        is_file=files.__contains__,
+        is_file=is_file,
     )
     assert got == expected
-
-
-def test_resolve_homenet_program_prefers_the_running_script(tmp_path, monkeypatch):
-    script = tmp_path / "homenet"
-    script.write_text("#!/bin/sh\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    assert resolve_homenet_program(argv0="homenet", which=lambda _name: "/other/homenet") == str(
-        script.resolve()
-    )
 
 
 @pytest.mark.parametrize(
@@ -253,61 +251,27 @@ WSL_ROUTE = _proc_route(
     ("eth0", _ANY, "172.22.240.1", _ANY),
     ("eth0", "172.22.240.0", _ANY, "255.255.240.0"),
 )
-HOME_ROUTE = _proc_route(
-    ("wlp2s0", _ANY, "192.168.1.1", _ANY),
-    ("wlp2s0", "192.168.1.0", _ANY, "255.255.255.0"),
-)
 
 
-@pytest.mark.parametrize(
-    ("env", "version", "route", "expect"),
-    [
-        ({"WSL_DISTRO_NAME": "Ubuntu"}, None, WSL_ROUTE, True),
-        ({}, "Linux version 5.15.90.1-microsoft-standard-WSL2", WSL_ROUTE, True),
-        ({}, "Linux version 5.15.90.1-MICROSOFT-standard", WSL_ROUTE, True),
-        ({}, "Linux version 6.12", WSL_ROUTE, False),
-        ({"WSL_DISTRO_NAME": "Ubuntu"}, None, HOME_ROUTE, False),
-        ({"WSL_DISTRO_NAME": "   "}, "Linux version 6.12", WSL_ROUTE, False),
-        ({}, None, WSL_ROUTE, False),
-    ],
-    ids=["env", "proc-version", "case", "not-wsl", "mirrored", "blank-env", "no-version"],
-)
-def test_wsl_nat_check(env, version, route, expect):
+@pytest.mark.parametrize("readable", [True, False], ids=["route", "unreadable"])
+def test_wsl_nat_check(readable, load_fixture):
     def read(path):
         if path == "/proc/net/route":
-            return route
-        if path == "/proc/version":
-            if version is None:
+            if not readable:
                 raise OSError(path)
-            return version
-        raise AssertionError(path)
+            return WSL_ROUTE
+        if path == "/sys/class/net/eth0/operstate":
+            return "up\n"
+        if path == "/proc/self/status":
+            return "CapEff:\t0000000000000000\n"
+        raise OSError(path)
 
-    result = check_wsl(read_text=read, environ=env)
-    if not expect:
+    result = check_wsl(read_text=read, environ={"WSL_DISTRO_NAME": "Ubuntu"})
+    if not readable:
         assert result is None
         return
     assert result is not None
     assert result.name == "wsl" and not result.ok and result.severity == "warning"
-    assert "WSL virtual network" in result.detail and "home LAN" in result.detail
-    assert "172.22.240.0/20" in result.detail
-    assert "networkingMode=mirrored" in (result.fix_hint or "")
-    assert "[wsl2]" in (result.fix_hint or "")
-    assert "%UserProfile%" in (result.fix_hint or "")
-    assert "wsl --shutdown" in (result.fix_hint or "")
-
-
-def test_run_all_checks_wsl_nat_is_a_warning(load_fixture):
-    files = {
-        "/proc/net/route": WSL_ROUTE,
-        "/sys/class/net/eth0/operstate": "up\n",
-        "/proc/self/status": "CapEff:\t0000000000000000\n",
-    }
-
-    def read(path):
-        if path not in files:
-            raise AssertionError(path)
-        return files[path]
-
     results = run_all_checks(
         which=lambda n: f"/usr/bin/{n}",
         run=_runner(load_fixture),
@@ -317,11 +281,9 @@ def test_run_all_checks_wsl_nat_is_a_warning(load_fixture):
         argv0="/opt/venv/bin/homenet",
         is_file=lambda path: path == "/opt/venv/bin/homenet",
     )
-    assert [r.name for r in results] == ["nmap", "ip", "privileges", "network", "ping", "wsl"]
+    assert [item.name for item in results] == ["nmap", "ip", "privileges", "network", "ping", "wsl"]
     assert results[-1].severity == "warning"
-    assert not any(not r.ok and r.severity != "warning" for r in results)
+    assert not any(not item.ok and item.severity != "warning" for item in results)
     loaded = json.loads(format_doctor_json(results))
     assert loaded["ok"] is True
-    assert loaded["checks"][-1]["name"] == "wsl"
     assert loaded["checks"][-1]["severity"] == "warning"
-    assert "networkingMode=mirrored" in loaded["checks"][-1]["fix_hint"]

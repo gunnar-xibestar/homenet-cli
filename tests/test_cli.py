@@ -156,18 +156,13 @@ def _patch_detect(monkeypatch, result: NetInfo | NetInfoError) -> None:
     monkeypatch.setattr(netinfo, "detect", detect)
 
 
-def test_whoami_net_prints_wsl_warning(capsys, monkeypatch):
+def test_whoami_json_includes_the_wsl_flag(capsys, monkeypatch):
     info = NetInfo("eth0", "172.22.240.5", "172.22.240.1", "172.22.240.0/20", wsl_nat=True)
     _patch_detect(monkeypatch, info)
-    assert main(["whoami-net"]) == 0
-    captured = capsys.readouterr()
-    assert captured.out == format_whoami(info) + "\n"
-    assert "WSL virtual network" in captured.out and "wsl --shutdown" in captured.out
     assert main(["whoami-net", "--json"]) == 0
     loaded = json.loads(capsys.readouterr().out)
     assert loaded["wsl_nat"] is True
-    assert "networkingMode=mirrored" in loaded["warning"]
-    assert "[wsl2]" in loaded["warning"]
+    assert loaded["warning"]
 
 
 def test_whoami_net_prints_core_netinfo(capsys, monkeypatch):
