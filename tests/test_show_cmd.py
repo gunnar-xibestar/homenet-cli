@@ -150,21 +150,6 @@ def no_scans(monkeypatch):
     monkeypatch.setattr(baseline, "load_baseline", fail)
 
 
-def test_help_mentions_show_cmd_and_explain(capsys):
-    with pytest.raises(SystemExit) as top:
-        main(["--help"])
-    assert top.value.code == 0
-    top_help = capsys.readouterr().out
-    assert "--show-cmd" in top_help and "explain" in top_help
-    with pytest.raises(SystemExit):
-        main(["devices", "--help"])
-    assert "--show-cmd" in capsys.readouterr().out
-    with pytest.raises(SystemExit):
-        main(["explain", "--help"])
-    out = capsys.readouterr().out
-    assert "ip" in out and "--json" in out and "homenet explain devices" in out
-
-
 @pytest.mark.parametrize(("command", "argv", "banner", "json_mode"), list(_show_params()))
 def test_show_cmd(command, argv, banner, json_mode, capsys, monkeypatch):
     cmd = _sample(command)

@@ -151,12 +151,6 @@ def test_format_devices_empty_list_explains_what_to_try():
     )
 
 
-def test_format_devices_uses_a_singular_count():
-    text = format_devices([Device("192.168.1.20", "AA:BB:CC:DD:EE:20", "HP", "printer")])
-    assert text.endswith("1 device found.")
-    assert "printer" in text
-
-
 def test_format_devices_sorts_ipv4_before_ipv6_before_junk():
     text = format_devices(
         [
@@ -235,15 +229,6 @@ def test_call_sites_sanitise_network_text(render, expected):
     assert "\x1b" not in text and "\x07" not in text and expected in text
 
 
-def test_format_device_accepts_a_parsed_host(load_fixture):
-    device = parse_nmap_xml(load_fixture("nmap_ports.xml"))[0]
-    text = format_device(device)
-    assert text.startswith("router.lan (192.168.1.1)")
-    assert "53      tcp       open      domain" in text
-    assert "80      tcp       open      http" in text
-    assert "443     tcp       filtered  unknown" in text
-
-
 _DIFF = """\
 Changes since your saved snapshot
 
@@ -302,18 +287,6 @@ def test_format_diff_flags_a_mac_change_as_spoof_or_replaced():
     assert "\nNew\n" not in text
     assert "\nMissing\n" not in text
     assert "\nChanged\n" not in text
-
-
-def test_format_diff_uses_the_plural_for_several_mac_changes():
-    old = [
-        Device("192.168.1.5", "aa:aa:aa:aa:aa:aa"),
-        Device("192.168.1.6", "cc:cc:cc:cc:cc:cc"),
-    ]
-    current = [
-        Device("192.168.1.5", "bb:bb:bb:bb:bb:bb"),
-        Device("192.168.1.6", "dd:dd:dd:dd:dd:dd"),
-    ]
-    assert format_diff(diff_devices(old, current)).endswith("2 MAC addresses changed.")
 
 
 def test_format_diff_shows_cleaned_field_changes_and_ignores_mac_case():

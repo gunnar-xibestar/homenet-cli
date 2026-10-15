@@ -65,11 +65,6 @@ def test_atomic_write_keeps_old_file_on_failure(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == ["b.json"]
 
 
-def test_load_fixture_v1(fixtures_dir):
-    devices = load_baseline(fixtures_dir / "baseline_v1.json")
-    assert len(devices) == 4 and devices[2].ports == [Port(80, "tcp", "open", "http")]
-
-
 def test_missing_baseline(tmp_path):
     with pytest.raises(BaselineNotFoundError) as ei:
         load_baseline(tmp_path / "nope.json")

@@ -52,16 +52,15 @@ def test_bad_input(text):
         parse_nmap_xml(text)
 
 
-def test_rejects_entities():
-    evil = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><nmaprun>&a;</nmaprun>'
-    with pytest.raises(ParseError):
-        parse_nmap_xml(evil)
-
-
-def test_external_entity_rejected():
-    xxe = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><nmaprun>&e;</nmaprun>'
+@pytest.mark.parametrize(
+    "entity",
+    ['<!ENTITY a "b">', '<!ENTITY e SYSTEM "file:///etc/passwd">'],
+    ids=["internal", "external"],
+)
+def test_entities_rejected(entity):
+    xml = f'<?xml version="1.0"?><!DOCTYPE x [{entity}]><nmaprun>&a;&e;</nmaprun>'
     with pytest.raises(ParseError, match="unsafe"):
-        parse_nmap_xml(xxe)
+        parse_nmap_xml(xml)
 
 
 def test_non_numeric_portid_skipped():
