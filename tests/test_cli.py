@@ -56,6 +56,37 @@ def test_console_script_entry_point():
     assert any(item.startswith("tomli") for item in dev)
 
 
+EXAMPLES = {
+    "whoami-net": "homenet whoami-net",
+    "devices": "homenet devices",
+    "device": "homenet device 192.168.1.20",
+    "ports": "homenet ports 192.168.1.1",
+    "services": "homenet services 192.168.1.1",
+    "router": "homenet router",
+    "baseline": "homenet baseline",
+    "new-devices": "homenet new-devices",
+    "speed": "homenet speed",
+    "doctor": "homenet doctor",
+}
+JSON_COMMANDS = {"whoami-net", "devices", "device", "new-devices", "doctor"}
+
+
+@pytest.mark.parametrize("command", [None, *EXAMPLES])
+def test_help(command, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([command, "--help"] if command else ["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    if command is None:
+        assert all(name in out for name in EXAMPLES)
+        return
+    assert "Example:" in out and EXAMPLES[command] in out
+    assert ("--json" in out) is (command in JSON_COMMANDS)
+    if command == "new-devices":
+        for code in ("0 when nothing changed", "1 when a device is new", "and 2 on error"):
+            assert code in out
+
+
 @pytest.mark.parametrize(
     ("argv", "banner"),
     [

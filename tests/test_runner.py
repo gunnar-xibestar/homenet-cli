@@ -140,8 +140,11 @@ def test_run_scan_missing_nmap_is_silent(monkeypatch, capsys):
 )
 def test_run_scan_failures(monkeypatch, result, exc, error):
     _fake_run(monkeypatch, result, exc)
-    with pytest.raises(error):
+    with pytest.raises(error) as ei:
         run_scan("192.168.1.0/24", local_network=LOCAL, timeout=1)
+    if result is not None:
+        assert ei.value.returncode == result.returncode
+        assert ei.value.stderr == result.stderr
 
 
 def test_syn_needs_root_detected_up_front(monkeypatch):
