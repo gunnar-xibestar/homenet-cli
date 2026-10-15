@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET  # noqa: S405 - DTD/entities rejected below
 from dataclasses import dataclass, field
+from xml.etree.ElementTree import ParseError as XMLParseError  # noqa: S405 - type only
+
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring
 
 
 class ParseError(Exception):
@@ -35,11 +38,13 @@ def parse_nmap_xml(xml_text: str, include_down: bool = False) -> list[Device]:
     """Return devices from nmap XML. Hosts not ``up`` are skipped by default."""
     if not xml_text or not xml_text.strip():
         raise ParseError("nmap produced no output.", "Re-run the scan; check nmap is installed.")
-    if "<!ENTITY" in xml_text:
-        raise ParseError("nmap output contains unexpected XML entities; refusing to parse.")
     try:
-        root = ET.fromstring(xml_text)  # noqa: S314 - entity declarations rejected above
-    except ET.ParseError as exc:
+        root = fromstring(xml_text)
+    except DefusedXmlException as exc:
+        raise ParseError(
+            "nmap output contains unsafe XML (entities/external references); refusing to parse."
+        ) from exc
+    except XMLParseError as exc:
         raise ParseError(
             "nmap output was incomplete or corrupted.",
             "The scan may have been interrupted; try running it again.",

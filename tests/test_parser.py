@@ -56,3 +56,20 @@ def test_rejects_entities():
     evil = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><nmaprun>&a;</nmaprun>'
     with pytest.raises(ParseError):
         parse_nmap_xml(evil)
+
+
+def test_external_entity_rejected():
+    xxe = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><nmaprun>&e;</nmaprun>'
+    with pytest.raises(ParseError, match="unsafe"):
+        parse_nmap_xml(xxe)
+
+
+def test_non_numeric_portid_skipped():
+    xml = (
+        '<nmaprun><host><status state="up"/><address addr="192.168.1.9" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="http"><state state="open"/></port>'
+        '<port protocol="tcp" portid=""><state state="open"/></port>'
+        '<port protocol="tcp" portid="22"><state state="open"/></port></ports></host></nmaprun>'
+    )
+    (dev,) = parse_nmap_xml(xml)
+    assert dev.ports == [Port(22, "tcp", "open", None)]

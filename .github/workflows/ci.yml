@@ -20,8 +20,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # nmap is intentionally NOT installed: tests must use fixtures only.
-      - name: Install dev tools
-        run: python -m pip install --upgrade pip ruff pytest
+      - name: Install package and dev tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
       - name: Ruff lint
         run: |
           ruff check .
