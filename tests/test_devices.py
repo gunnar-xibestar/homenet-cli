@@ -291,8 +291,13 @@ def test_hung_lookup_does_not_block_process_exit():
         hang = threading.Event()
         start = time.monotonic()
         names = resolve_all(["192.168.1.9"], lambda ip: hang.wait(30), budget=1.0)
-        assert names == {"192.168.1.9": None}
-        print(round(time.monotonic() - start, 2))
+        if names != {"192.168.1.9": None}:
+            sys.exit(2)
+        elapsed = time.monotonic() - start
+        if elapsed >= 2.0:
+            sys.exit(3)
+        print(round(elapsed, 2))
+        sys.exit(0)
         """
     )
     start = time.monotonic()
