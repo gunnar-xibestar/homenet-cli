@@ -1,8 +1,23 @@
 """Plain-text formatters. They never scan and never run system commands."""
 
+import json
+
+import pytest
+
+from homenet.core.baseline import diff_devices, load_baseline
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port, parse_nmap_xml
-from homenet.output import format_device, format_devices, format_error, format_whoami
+from homenet.output import (
+    format_device,
+    format_device_json,
+    format_devices,
+    format_devices_json,
+    format_diff,
+    format_diff_json,
+    format_error,
+    format_whoami,
+    format_whoami_json,
+)
 
 _WHOAMI = """\
 This computer on your home network
@@ -240,3 +255,246 @@ def test_format_device_accepts_a_parsed_host(load_fixture):
     assert "53      tcp       open      domain" in text
     assert "80      tcp       open      http" in text
     assert "443     tcp       filtered  unknown" in text
+
+
+_DIFF = """\
+Changes since your saved snapshot
+
+New
+These devices were not in your saved snapshot.
+
+IP address    Name     MAC address        Maker
+192.168.1.42  unknown  3C:22:FB:44:55:66  Apple
+192.168.1.77  unknown  7C:2F:80:DE:AD:01  unknown
+
+Missing
+These devices were in your saved snapshot but are not on the network now.
+
+IP address    Name     MAC address        Maker
+192.168.1.50  unknown  00:11:22:33:44:55  Old Printer Co
+
+Changed
+A detail changed on these devices.
+
+pihole.lan (192.168.1.23)
+
+IP address  was 192.168.1.20, now 192.168.1.23
+
+2 new devices. 1 missing device. 1 changed device.\
+"""
+
+_NO_CHANGES = (
+    "No changes since your saved snapshot.\n"
+    "\n"
+    "The devices on your network match the snapshot you saved with `homenet baseline`."
+)
+
+
+def test_format_diff_reports_new_missing_and_changed(load_fixture, fixtures_dir):
+    old = load_baseline(fixtures_dir / "baseline_v1.json")
+    current = parse_nmap_xml(load_fixture("nmap_sn_hosts.xml"))
+    assert format_diff(diff_devices(old, current)) == _DIFF
+
+
+def test_format_diff_says_when_nothing_changed():
+    device = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", "Router", "router")
+    assert format_diff(diff_devices([device], [device])) == _NO_CHANGES
+
+
+def test_format_diff_flags_a_mac_change_as_spoof_or_replaced():
+    old = Device("192.168.1.5", "aa:aa:aa:aa:aa:aa", "Old\x1bCo", None)
+    current = Device("192.168.1.5", "bb:bb:bb:bb:bb:bb", "New\x1bCo", None)
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert "MAC address changed" in text
+    assert "This may be a spoof or a replaced device." in text
+    assert "Possible spoof or replaced device." in text
+    assert "Was  aa:aa:aa:aa:aa:aa  Old?Co" in text
+    assert "Now  bb:bb:bb:bb:bb:bb  New?Co" in text
+    assert text.endswith("1 MAC address changed.")
+    assert "\nNew\n" not in text
+    assert "\nMissing\n" not in text
+    assert "\nChanged\n" not in text
+
+
+def test_format_diff_uses_the_plural_for_several_mac_changes():
+    old = [
+        Device("192.168.1.5", "aa:aa:aa:aa:aa:aa"),
+        Device("192.168.1.6", "cc:cc:cc:cc:cc:cc"),
+    ]
+    current = [
+        Device("192.168.1.5", "bb:bb:bb:bb:bb:bb"),
+        Device("192.168.1.6", "dd:dd:dd:dd:dd:dd"),
+    ]
+    assert format_diff(diff_devices(old, current)).endswith("2 MAC addresses changed.")
+
+
+def test_format_diff_shows_cleaned_field_changes_and_ignores_mac_case():
+    old = Device("192.168.1.20", "aa:bb:cc:dd:ee:ff", "Dell", "lap\x1btop", [])
+    current = Device(
+        "192.168.1.23",
+        "AA:BB:CC:DD:EE:FF",
+        "HP",
+        "laptop",
+        [Port(22, "tcp", "open", "ssh")],
+    )
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert text == (
+        "Changes since your saved snapshot\n"
+        "\n"
+        "Changed\n"
+        "A detail changed on these devices.\n"
+        "\n"
+        "laptop (192.168.1.23)\n"
+        "\n"
+        "IP address  was 192.168.1.20, now 192.168.1.23\n"
+        "Name        was lap?top, now laptop\n"
+        "Maker       was Dell, now HP\n"
+        "Ports       was none reported, now 22/tcp open (ssh)\n"
+        "\n"
+        "1 changed device."
+    )
+
+
+def test_format_diff_says_when_a_change_cleans_to_the_same_text():
+    old = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", hostname="a\x1b")
+    current = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa", hostname="a?")
+    text = format_diff(diff_devices([old], [current]))
+    assert "\x1b" not in text
+    assert "Details  changed" in text
+
+
+def test_devices_json_shape_nulls_and_sorted_ports():
+    text = format_devices_json(
+        [
+            Device(
+                "192.168.1.10",
+                "AA:BB:CC:DD:EE:10",
+                "Dell",
+                "laptop",
+                [Port(80, "tcp", "open", "http"), Port(53, "udp", "open", None)],
+            ),
+            Device("192.168.1.2", None, "  ", None),
+        ]
+    )
+    assert json.loads(text) == {
+        "devices": [
+            {
+                "hostname": None,
+                "ip": "192.168.1.2",
+                "mac": None,
+                "ports": [],
+                "vendor": None,
+            },
+            {
+                "hostname": "laptop",
+                "ip": "192.168.1.10",
+                "mac": "AA:BB:CC:DD:EE:10",
+                "ports": [
+                    {"number": 53, "protocol": "udp", "service": None, "state": "open"},
+                    {"number": 80, "protocol": "tcp", "service": "http", "state": "open"},
+                ],
+                "vendor": "Dell",
+            },
+        ]
+    }
+    assert text == json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=True)
+
+
+@pytest.mark.parametrize(
+    ("device", "wrapped", "expected", "snippets", "absent"),
+    [
+        pytest.param(
+            Device("192.168.1.5", 'aa"bb', "v\\endor", 'h"ost\nname'),
+            True,
+            {"hostname": 'h"ost?name', "mac": 'aa"bb', "vendor": "v\\endor"},
+            ('"hostname": "h\\"ost?name"', '"mac": "aa\\"bb"', '"vendor": "v\\\\endor"'),
+            ("\nname", "\x1b"),
+            id="quotes-backslash-newline",
+        ),
+        pytest.param(
+            Device("10.0.0.1", None, None, '"}, "pwn": true'),
+            True,
+            {"hostname": '"}, "pwn": true'},
+            (),
+            (),
+            id="injected-json",
+        ),
+        pytest.param(
+            Device(
+                "192.168.1.9\x1b[2J",
+                None,
+                "caf\u00e9",
+                "x\x1b[2Jy",
+                [Port(80, "tc\x1bp", "open", "ht\x1btp")],
+            ),
+            False,
+            {
+                "hostname": "x?[2Jy",
+                "ip": "192.168.1.9?[2J",
+                "vendor": "caf\u00e9",
+                "mac": None,
+                "ports": [{"number": 80, "protocol": "tc?p", "service": "ht?tp", "state": "open"}],
+            },
+            ("\\u00e9",),
+            ("\x1b",),
+            id="controls-and-non-ascii",
+        ),
+    ],
+)
+def test_json_dumps_escapes_device_strings(device, wrapped, expected, snippets, absent):
+    text = format_devices_json([device]) if wrapped else format_device_json(device)
+    loaded = json.loads(text)
+    assert text == json.dumps(loaded, indent=2, sort_keys=True, ensure_ascii=True)
+    body = loaded["devices"][0] if wrapped else loaded
+    assert set(body) == {"hostname", "ip", "mac", "ports", "vendor"}
+    for key, value in expected.items():
+        assert body[key] == value
+    for snippet in snippets:
+        assert snippet in text
+    for item in absent:
+        assert item not in text
+    if "pwn" in (device.hostname or ""):
+        assert list(loaded) == ["devices"]
+        assert "pwn" not in loaded
+
+
+def test_whoami_json_uses_null_for_missing_fields():
+    text = format_whoami_json(NetInfo("eth0\x1b", None, "10.0.0.1", "10.0.0.0/24"))
+    assert "\x1b" not in text
+    assert json.loads(text) == {
+        "gateway": "10.0.0.1",
+        "interface": "eth0?",
+        "ip": None,
+        "subnet": "10.0.0.0/24",
+    }
+
+
+def test_diff_json_shape_covers_every_section():
+    old = Device("192.168.1.5", "aa:aa:aa:aa:aa:aa", "Old", "printer")
+    current = Device("192.168.1.5", "bb:bb:bb:bb:bb:bb", "New\x1b", "phone")
+    added = Device("192.168.1.9", None, None, "cam\x1bera")
+    text = format_diff_json(diff_devices([old], [current, added]))
+    assert "\x1b" not in text
+    loaded = json.loads(text)
+    assert set(loaded) == {"changed", "has_changes", "mac_changed", "missing", "new"}
+    assert loaded["has_changes"] is True
+    assert loaded["changed"] == []
+    assert loaded["missing"] == []
+    assert loaded["new"][0]["hostname"] == "cam?era"
+    pair = loaded["mac_changed"][0]
+    assert set(pair) == {"before", "after"}
+    assert pair["before"]["mac"] == "aa:aa:aa:aa:aa:aa"
+    assert pair["after"]["hostname"] == "phone"
+    assert pair["after"]["vendor"] == "New?"
+
+
+def test_diff_json_has_changes_is_false_when_nothing_changed():
+    device = Device("192.168.1.1", "aa:aa:aa:aa:aa:aa")
+    loaded = json.loads(format_diff_json(diff_devices([device], [device])))
+    assert loaded["has_changes"] is False
+    assert loaded["new"] == []
+    assert loaded["missing"] == []
+    assert loaded["changed"] == []
+    assert loaded["mac_changed"] == []
