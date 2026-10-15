@@ -8,6 +8,8 @@ from xml.etree.ElementTree import ParseError as XMLParseError  # noqa: S405 - ty
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
+from homenet.core._text import _clean
+
 
 class ParseError(Exception):
     """nmap output could not be understood. ``hint`` is a beginner-friendly fix."""
@@ -23,6 +25,8 @@ class Port:
     protocol: str
     state: str
     service: str | None = None
+    product: str | None = None  # from -sV, e.g. "OpenSSH"
+    version: str | None = None  # from -sV, e.g. "9.2p1"
 
 
 @dataclass
@@ -82,7 +86,9 @@ def parse_nmap_xml(xml_text: str, include_down: bool = False) -> list[Device]:
                     number=number,
                     protocol=p.get("protocol", "tcp"),
                     state=st.get("state", "unknown") if st is not None else "unknown",
-                    service=svc.get("name") if svc is not None else None,
+                    service=_clean(svc.get("name")) if svc is not None else None,
+                    product=_clean(svc.get("product")) if svc is not None else None,
+                    version=_clean(svc.get("version")) if svc is not None else None,
                 )
             )
         devices.append(Device(ip=ip, mac=mac, vendor=vendor, hostname=hostname, ports=ports))

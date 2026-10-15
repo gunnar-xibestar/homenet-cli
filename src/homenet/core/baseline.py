@@ -61,7 +61,14 @@ def default_baseline_path(
 
 def _device_from_dict(d: Mapping) -> Device:
     ports = [
-        Port(int(p["number"]), str(p["protocol"]), str(p["state"]), p.get("service"))
+        Port(
+            int(p["number"]),
+            str(p["protocol"]),
+            str(p["state"]),
+            p.get("service"),
+            p.get("product"),
+            p.get("version"),
+        )
         for p in d.get("ports") or []
     ]
     return Device(
