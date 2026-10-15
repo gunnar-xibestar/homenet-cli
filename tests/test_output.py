@@ -162,6 +162,47 @@ def test_format_device_without_a_name_or_ports():
     assert text.endswith("No ports were reported for this device.")
 
 
+def test_device_strings_replace_control_and_nonprintable_characters():
+    """A hostile name or vendor must not be able to drive the terminal."""
+    screen = format_devices([Device("192.168.1.5", None, "Ok", "x\x1b[2Jy")])
+    assert "\x1b" not in screen
+    assert "x?[2Jy" in screen
+
+    title = format_devices([Device("192.168.1.6", None, "Evil\x1b]0;pwn\x07", "ok")])
+    assert "\x1b" not in title
+    assert "\x07" not in title
+    assert "Evil?]0;pwn?" in title
+
+    bare = format_devices([Device("192.168.1.7", None, "a\x00b\x07c\x7fd", "e\x1ff")])
+    for char in ("\x00", "\x07", "\x7f", "\x1f"):
+        assert char not in bare
+    assert "a?b?c?d" in bare
+    assert "e?f" in bare
+
+    spaced = format_devices([Device("192.168.1.8", "aa\tbb", "line\r\nmore", "tab\there")])
+    assert "\t" not in spaced
+    assert "\r" not in spaced
+    assert "\nmore" not in spaced
+    assert "tab?here" in spaced
+    assert "aa?bb" in spaced
+    assert "line??more" in spaced
+
+    c1 = format_device(
+        Device(
+            "192.168.1.9",
+            None,
+            "c\x9d0;pwn\x9cd",
+            "a\x9b[2Jb\x85c",
+            [Port(80, "tcp", "open", "ht\x1btp")],
+        )
+    )
+    for char in ("\x1b", "\x9b", "\x9d", "\x9c", "\x85"):
+        assert char not in c1
+    assert "a?[2Jb?c" in c1
+    assert "c?0;pwn?d" in c1
+    assert "ht?tp" in c1
+
+
 def test_format_device_accepts_a_parsed_host(load_fixture):
     device = parse_nmap_xml(load_fixture("nmap_ports.xml"))[0]
     text = format_device(device)

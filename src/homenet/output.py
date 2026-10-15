@@ -127,9 +127,16 @@ def _ip_with_prefix(info: NetInfo) -> str:
 
 
 def _clean(value: str | None) -> str | None:
+    """Trim surrounding space and replace non-printable characters with ``?``.
+
+    Hostnames, vendors, and other device strings are untrusted network data.
+    ESC/CSI/OSC sequences, C0 and C1 controls, newlines, and similar characters
+    are turned into a visible ``?`` so they cannot change the terminal.
+    """
     if value is None:
         return None
-    stripped = value.strip()
+    visible = "".join(char if char.isprintable() else "?" for char in value)
+    stripped = visible.strip()
     return stripped or None
 
 
