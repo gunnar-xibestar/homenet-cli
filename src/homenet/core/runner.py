@@ -34,22 +34,35 @@ SCAN_MODES: dict[str, tuple[str, ...]] = {
     "ping": ("-sn",),
     "tcp-connect": ("-sT",),
     "syn": ("-sS",),
+    # Service detection: -sV is only ever allowed with --version-light (intensity 2).
+    "service": ("-sT", "-sV", "--version-light"),
 }
 DEFAULT_MODE = "ping"
-PORT_SCAN_MODES = frozenset({"tcp-connect", "syn"})
+PORT_SCAN_MODES = frozenset({"tcp-connect", "syn", "service"})
 # Modes that need raw sockets (root or CAP_NET_RAW); checked before nmap runs.
 PRIVILEGED_MODES = frozenset({"syn"})
 CAP_NET_RAW = 13
 
 # Every flag that may ever appear in a command we build.
 ALLOWED_FLAGS = frozenset(
-    {"-sn", "-sT", "-sS", "--top-ports", "-oX", "-n", "-T3", "-T4", "--privileged"}
+    {
+        "-sn",
+        "-sT",
+        "-sS",
+        "-sV",
+        "--version-light",
+        "--top-ports",
+        "-oX",
+        "-n",
+        "-T3",
+        "-T4",
+        "--privileged",
+    }
 )
 
 # Explicitly intrusive options, rejected with a clear message.
 BLOCKED_FLAGS = frozenset(
     {
-        "-sV",
         "-sC",
         "-A",
         "-O",
@@ -60,6 +73,8 @@ BLOCKED_FLAGS = frozenset(
         "-p",
         "--osscan-guess",
         "--version-all",
+        "--version-intensity",
+        "--version-trace",
         "-T5",
         "-iL",
         "-oN",
@@ -215,12 +230,22 @@ def has_raw_socket_privileges(
 
 
 def check_flags(flags: Sequence[str]) -> None:
-    """Raise :class:`DisallowedFlagError` unless every flag is allowlisted."""
+    """Raise :class:`DisallowedFlagError` unless every flag is allowlisted.
+
+    ``-sV`` is only accepted together with ``--version-light``.
+    """
+    bases = [f.split("=", 1)[0] for f in flags]
+    if "-sV" in bases and "--version-light" not in bases:
+        raise DisallowedFlagError(
+            "nmap option '-sV' is only allowed together with --version-light.",
+            "homenet only runs light service detection.",
+        )
     for flag in flags:
         base = flag.split("=", 1)[0]
         if (
             base in BLOCKED_FLAGS
             or base.startswith("--script")
+            or (base.startswith("--version-") and base != "--version-light")
             or (base.startswith("-p") and base not in ALLOWED_FLAGS)
         ):
             raise DisallowedFlagError(

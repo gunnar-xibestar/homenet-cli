@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap -sT -sV --version-light --top-ports 100 -T4 -oX - 192.168.1.1/32" start="1760521200" version="7.94" xmloutputversion="1.05">
+<host><status state="up" reason="syn-ack" reason_ttl="0"/>
+<address addr="192.168.1.1" addrtype="ipv4"/>
+<address addr="A4:2B:B0:11:22:33" addrtype="mac" vendor="TP-Link Technologies"/>
+<hostnames><hostname name="router.lan" type="PTR"/></hostnames>
+<ports><extraports state="closed" count="95"/>
+<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/><service name="ssh" product="Dropbear sshd" version="2022.83" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="23"><state state="open" reason="syn-ack"/><service name="telnet" method="table" conf="3"/></port>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack"/><service name="http" product="lighttpd" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/><service name="https" method="table" conf="3"/></port>
+<port protocol="tcp" portid="49152"><state state="open" reason="syn-ack"/><service name="unknown" method="table" conf="3"/></port>
+</ports>
+</host>
+<runstats><finished time="1760521210" elapsed="10.1" exit="success"/><hosts up="1" down="0" total="1"/></runstats>
+</nmaprun>

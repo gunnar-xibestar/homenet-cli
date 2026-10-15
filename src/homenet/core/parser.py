@@ -23,6 +23,8 @@ class Port:
     protocol: str
     state: str
     service: str | None = None
+    product: str | None = None  # from -sV, e.g. "OpenSSH"
+    version: str | None = None  # from -sV, e.g. "9.2p1"
 
 
 @dataclass
@@ -83,6 +85,8 @@ def parse_nmap_xml(xml_text: str, include_down: bool = False) -> list[Device]:
                     protocol=p.get("protocol", "tcp"),
                     state=st.get("state", "unknown") if st is not None else "unknown",
                     service=svc.get("name") if svc is not None else None,
+                    product=(svc.get("product") or None) if svc is not None else None,
+                    version=(svc.get("version") or None) if svc is not None else None,
                 )
             )
         devices.append(Device(ip=ip, mac=mac, vendor=vendor, hostname=hostname, ports=ports))
