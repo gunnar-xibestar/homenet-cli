@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Callable, Sequence
 
+from homenet.core.commands import Command
 from homenet.core.devices import detect_local_network
 from homenet.core.parser import Device, parse_nmap_xml
 from homenet.core.runner import (
@@ -16,6 +17,7 @@ from homenet.core.runner import (
     InvalidTargetError,
     ScanResult,
     TargetNotAllowedError,
+    build_scan_command,
     run_scan,
 )
 
@@ -63,6 +65,40 @@ def _scan(mode, target, top_ports, local_network, timeout, scan, ip_runner) -> l
     return parse_nmap_xml(result.xml)
 
 
+def _no_exec(args):
+    raise OSError("planning runs no commands; pass local_network")
+
+
+def _service_target(target, local_network, ip_runner, allow_subnet) -> tuple[str, str]:
+    net, local = resolve_local_target(target, local_network, ip_runner)  # local-only first
+    if not allow_subnet and (target is None or ipaddress.ip_network(net).num_addresses != 1):
+        raise InvalidTargetError(
+            f"{net} is a subnet; service detection only scans one device by default.",
+            "Give one IP, e.g. 192.168.1.10, or explicitly allow a subnet scan.",
+        )
+    return net, local
+
+
+def build_ports_command(
+    target=None, *, top_ports: int = DEFAULT_TOP_PORTS, local_network=None
+) -> Command:
+    """Validated top-ports nmap Command (same checks as :func:`scan_ports`; runs nothing)."""
+    net, local = resolve_local_target(target, local_network, _no_exec)
+    return build_scan_command(net, "tcp-connect", top_ports, local_network=local)
+
+
+def build_services_command(
+    target=None,
+    *,
+    top_ports: int = DEFAULT_TOP_PORTS,
+    local_network=None,
+    allow_subnet: bool = False,
+) -> Command:
+    """Validated light -sV nmap Command (same checks as :func:`scan_services`)."""
+    net, local = _service_target(target, local_network, _no_exec, allow_subnet)
+    return build_scan_command(net, "service", top_ports, local_network=local)
+
+
 def scan_ports(
     target: ipaddress.IPv4Network | str | None = None,
     *,
@@ -91,10 +127,5 @@ def scan_services(
     Never uses scripts, ``-A`` or ``-O``. Port.product / Port.version are filled in.
     Only a single host is scanned unless ``allow_subnet=True``.
     """
-    net, local = resolve_local_target(target, local_network, ip_runner)  # local-only first
-    if not allow_subnet and (target is None or ipaddress.ip_network(net).num_addresses != 1):
-        raise InvalidTargetError(
-            f"{net} is a subnet; service detection only scans one device by default.",
-            "Give one IP, e.g. 192.168.1.10, or explicitly allow a subnet scan.",
-        )
+    net, local = _service_target(target, local_network, ip_runner, allow_subnet)
     return _scan("service", net, top_ports, local, timeout, scan, ip_runner)

@@ -17,6 +17,8 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from homenet.core.commands import Command, http_command, notify
+
 DEFAULT_BYTES = 1_000_000
 MAX_BYTES = 2_000_000
 DEFAULT_TIMEOUT = 20.0
@@ -118,6 +120,20 @@ def _run_bounded(fetch: FetchFn, url: str, timeout: float, nbytes: int) -> bytes
     return box.get("result")
 
 
+def build_speed_command(
+    *, nbytes: int = DEFAULT_BYTES, timeout: float = DEFAULT_TIMEOUT, url: str | None = None
+) -> Command:
+    """Validated HTTPS sample Command. Runs nothing."""
+    if nbytes < 1 or nbytes > MAX_BYTES:
+        raise SpeedError(
+            f"A speed sample must be between 1 and {MAX_BYTES} bytes.",
+            "This is a bug in the speed check; please report it.",
+        )
+    sample = url if url is not None else DEFAULT_URL.format(nbytes=nbytes)
+    _require_https(sample)
+    return http_command(sample, f"download {nbytes} bytes to estimate speed", timeout)
+
+
 def measure_download(
     *,
     nbytes: int = DEFAULT_BYTES,
@@ -131,15 +147,11 @@ def measure_download(
     ``fetch`` and ``clock`` are injectable so tests never touch the network.
     The default URL is Cloudflare's fixed-size download endpoint.
     """
-    if nbytes < 1 or nbytes > MAX_BYTES:
-        raise SpeedError(
-            f"A speed sample must be between 1 and {MAX_BYTES} bytes.",
-            "This is a bug in the speed check; please report it.",
-        )
-    sample = url if url is not None else DEFAULT_URL.format(nbytes=nbytes)
-    _require_https(sample)
+    cmd = build_speed_command(nbytes=nbytes, timeout=timeout, url=url)
+    sample = cmd.url
     fetch = fetch or download_https
     clock = clock or time.perf_counter
+    notify(cmd)  # the hook sees exactly the URL fetched next
     start = clock()
     try:
         data = _run_bounded(fetch, sample, timeout, nbytes)
