@@ -58,8 +58,12 @@ result (quotes, backslashes, and non-ASCII).
      "vendor": str|null}
 
 ``doctor`` ``ok`` is false only when a check failed at error severity.
-Warnings leave it true. ``new-devices`` exits 0 when ``has_changes`` is false
-and 1 when it is true.
+Warnings leave it true. ``new-devices`` exits 0 when ``has_changes`` is false,
+1 when it is true, and 2 when the command fails.
+
+``--json`` errors are a JSON object on stderr::
+
+    {"error": str, "fix_hint": str|null}
 """
 
 from __future__ import annotations
@@ -90,11 +94,24 @@ def format_error(message: str, hint: str | None = None) -> str:
 
     Both strings are cleaned. A hint can repeat an interface name from the network.
     """
-    text = _clean(message) or "Something went wrong."
-    fix = _clean(hint)
+    text, fix = _error_parts(message, hint)
     if fix:
         return f"{text}\nFix: {fix}"
     return text
+
+
+def format_error_json(message: str, hint: str | None = None) -> str:
+    """JSON error object for ``--json`` (written to stderr by the CLI).
+
+    Shape: ``{"error": str, "fix_hint": str|null}``. Strings go through
+    :func:`_clean`, then :func:`json.dumps`.
+    """
+    text, fix = _error_parts(message, hint)
+    return _dumps({"error": text, "fix_hint": fix})
+
+
+def _error_parts(message: str, hint: str | None) -> tuple[str, str | None]:
+    return _clean(message) or "Something went wrong.", _clean(hint)
 
 
 def format_whoami(info: NetInfo) -> str:

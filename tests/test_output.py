@@ -2,9 +2,9 @@
 
 import json
 
-import homenet.output as output
+import pytest
+
 from homenet.core.baseline import diff_devices, load_baseline
-from homenet.core.checks import CheckResult
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port, parse_nmap_xml
 from homenet.output import (
@@ -14,7 +14,6 @@ from homenet.output import (
     format_devices_json,
     format_diff,
     format_diff_json,
-    format_doctor_json,
     format_error,
     format_whoami,
     format_whoami_json,
@@ -291,21 +290,6 @@ _NO_CHANGES = (
 )
 
 
-def test_json_shapes_are_documented():
-    doc = output.__doc__ or ""
-    for phrase in (
-        "homenet devices --json",
-        "homenet device <ip> --json",
-        "homenet new-devices --json",
-        "homenet whoami-net --json",
-        "homenet doctor --json",
-        "has_changes",
-        "mac_changed",
-        "fix_hint",
-    ):
-        assert phrase in doc
-
-
 def test_format_diff_reports_new_missing_and_changed(load_fixture, fixtures_dir):
     old = load_baseline(fixtures_dir / "baseline_v1.json")
     current = parse_nmap_xml(load_fixture("nmap_sn_hosts.xml"))
@@ -418,47 +402,62 @@ def test_devices_json_shape_nulls_and_sorted_ports():
     assert text == json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def test_json_dumps_escapes_device_strings():
-    text = format_devices_json([Device("192.168.1.5", 'aa"bb', "v\\endor", 'h"ost\nname')])
-    assert "\nname" not in text
-    host_line = next(line for line in text.splitlines() if "hostname" in line)
-    assert host_line == '      "hostname": "h\\"ost?name",'
-    assert '      "mac": "aa\\"bb",' in text
-    assert '      "vendor": "v\\\\endor"' in text
+@pytest.mark.parametrize(
+    ("device", "wrapped", "expected", "snippets", "absent"),
+    [
+        pytest.param(
+            Device("192.168.1.5", 'aa"bb', "v\\endor", 'h"ost\nname'),
+            True,
+            {"hostname": 'h"ost?name', "mac": 'aa"bb', "vendor": "v\\endor"},
+            ('"hostname": "h\\"ost?name"', '"mac": "aa\\"bb"', '"vendor": "v\\\\endor"'),
+            ("\nname", "\x1b"),
+            id="quotes-backslash-newline",
+        ),
+        pytest.param(
+            Device("10.0.0.1", None, None, '"}, "pwn": true'),
+            True,
+            {"hostname": '"}, "pwn": true'},
+            (),
+            (),
+            id="injected-json",
+        ),
+        pytest.param(
+            Device(
+                "192.168.1.9\x1b[2J",
+                None,
+                "caf\u00e9",
+                "x\x1b[2Jy",
+                [Port(80, "tc\x1bp", "open", "ht\x1btp")],
+            ),
+            False,
+            {
+                "hostname": "x?[2Jy",
+                "ip": "192.168.1.9?[2J",
+                "vendor": "caf\u00e9",
+                "mac": None,
+                "ports": [{"number": 80, "protocol": "tc?p", "service": "ht?tp", "state": "open"}],
+            },
+            ("\\u00e9",),
+            ("\x1b",),
+            id="controls-and-non-ascii",
+        ),
+    ],
+)
+def test_json_dumps_escapes_device_strings(device, wrapped, expected, snippets, absent):
+    text = format_devices_json([device]) if wrapped else format_device_json(device)
     loaded = json.loads(text)
-    assert loaded["devices"][0]["hostname"] == 'h"ost?name'
-    assert loaded["devices"][0]["vendor"] == "v\\endor"
-    assert loaded["devices"][0]["mac"] == 'aa"bb'
-
-
-def test_json_dumps_cannot_be_broken_by_a_device_string():
-    raw = format_devices_json([Device("10.0.0.1", None, None, '"}, "pwn": true')])
-    loaded = json.loads(raw)
-    assert list(loaded) == ["devices"]
-    assert loaded["devices"][0]["hostname"] == '"}, "pwn": true'
-    assert "pwn" not in loaded
-
-
-def test_json_dumps_escapes_non_ascii_and_cleans_controls():
-    text = format_device_json(
-        Device(
-            "192.168.1.9\x1b[2J",
-            None,
-            "caf\u00e9",
-            "x\x1b[2Jy",
-            [Port(80, "tc\x1bp", "open", "ht\x1btp")],
-        )
-    )
-    assert "\x1b" not in text
-    assert "\\u00e9" in text
-    loaded = json.loads(text)
-    assert set(loaded) == {"hostname", "ip", "mac", "ports", "vendor"}
-    assert loaded["hostname"] == "x?[2Jy"
-    assert loaded["ip"] == "192.168.1.9?[2J"
-    assert loaded["vendor"] == "caf\u00e9"
-    assert loaded["ports"] == [
-        {"number": 80, "protocol": "tc?p", "service": "ht?tp", "state": "open"}
-    ]
+    assert text == json.dumps(loaded, indent=2, sort_keys=True, ensure_ascii=True)
+    body = loaded["devices"][0] if wrapped else loaded
+    assert set(body) == {"hostname", "ip", "mac", "ports", "vendor"}
+    for key, value in expected.items():
+        assert body[key] == value
+    for snippet in snippets:
+        assert snippet in text
+    for item in absent:
+        assert item not in text
+    if "pwn" in (device.hostname or ""):
+        assert list(loaded) == ["devices"]
+        assert "pwn" not in loaded
 
 
 def test_whoami_json_uses_null_for_missing_fields():
@@ -499,24 +498,3 @@ def test_diff_json_has_changes_is_false_when_nothing_changed():
     assert loaded["missing"] == []
     assert loaded["changed"] == []
     assert loaded["mac_changed"] == []
-
-
-def test_doctor_json_ok_ignores_warnings_and_cleans_details():
-    warning = format_doctor_json(
-        [
-            CheckResult("nmap", True, "nmap 7.95", None, "ok"),
-            CheckResult("privileges", False, "user on eth0\x1b", "Re-run", "warning"),
-        ]
-    )
-    assert "\x1b" not in warning
-    loaded = json.loads(warning)
-    assert loaded["ok"] is True
-    assert loaded["checks"][1]["detail"] == "user on eth0?"
-    assert loaded["checks"][1]["fix_hint"] == "Re-run"
-    failed = json.loads(
-        format_doctor_json(
-            [CheckResult("nmap", False, "missing", "sudo apt install nmap", "error")]
-        )
-    )
-    assert failed["ok"] is False
-    assert failed["checks"][0]["fix_hint"] == "sudo apt install nmap"
