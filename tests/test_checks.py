@@ -1,7 +1,9 @@
 import dataclasses
+import re
 
 import pytest
 
+from homenet.cli import build_parser
 from homenet.core.checks import (
     CheckResult,
     check_network,
@@ -63,9 +65,13 @@ def test_privileges_cap_net_raw():
 def test_privileges_unprivileged_is_warning():
     r = check_privileges(geteuid=lambda: 1000, read_text=lambda p: "CapEff:\t0\n", environ={})
     assert not r.ok and r.severity == "warning"
-    assert r.fix_hint.startswith("Easiest: re-run with sudo")
-    assert "cap_net_raw+eip" in r.fix_hint and "cap_net_admin" not in r.fix_hint
-    assert "$(which" not in r.fix_hint and "every user" in r.fix_hint
+    assert r.fix_hint == "Re-run with sudo, for example `sudo homenet devices`."
+    assert "setcap" not in r.fix_hint
+    named = re.search(r"`sudo homenet ([a-z0-9-]+)`", r.fix_hint or "")
+    assert named is not None
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args([named.group(1), "--help"])
+    assert exc.value.code == 0
 
 
 def test_network_ok():

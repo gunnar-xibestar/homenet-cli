@@ -104,10 +104,7 @@ def check_privileges(
         False,
         "running as a normal user: scans work, but MAC addresses/vendors and SYN scans "
         "need extra privileges",
-        "Easiest: re-run with sudo, e.g. `sudo homenet scan`. "
-        "Advanced alternative: `sudo setcap cap_net_raw+eip /usr/bin/nmap` (use the path "
-        "from `command -v nmap`) and run nmap with --privileged. Be careful: this lets "
-        "every user on this computer send raw network packets through nmap, not just you.",
+        "Re-run with sudo, for example `sudo homenet devices`.",
         "warning",
     )
 

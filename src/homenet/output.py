@@ -25,7 +25,7 @@ Input shapes for Net Core to match:
 Missing device fields (``hostname``, ``mac``, ``vendor``, ``service``) are
 shown as ``unknown``. Missing network fields are shown as ``not available``.
 
-``--json`` shapes (keys sorted, ``null`` for a missing string). Every string
+``--json`` shapes (keys sorted, ``null`` for a missing value). Every string
 below has been passed through :func:`_clean`. :func:`json.dumps` escapes the
 result (quotes, backslashes, and non-ASCII).
 
@@ -47,7 +47,11 @@ result (quotes, backslashes, and non-ASCII).
 
 ``homenet whoami-net --json``::
 
-    {"gateway": str|null, "interface": str|null, "ip": str|null, "subnet": str|null}
+    {"gateway": str|null, "interface": str|null, "ip": str|null,
+     "prefix": int|null, "subnet": str|null}
+
+``ip`` is the address. ``prefix`` is the integer length the plain view shows
+after it (``address/prefix``). ``prefix`` is null when that line has no prefix.
 
 ``homenet doctor --json``::
 
@@ -267,10 +271,15 @@ def format_diff(diff: DeviceDiff) -> str:
 
 
 def format_whoami_json(info: NetInfo) -> str:
-    """JSON for ``homenet whoami-net --json``. See the module docstring."""
+    """JSON for ``homenet whoami-net --json``. See the module docstring.
+
+    ``ip`` and ``prefix`` are the same address and length the plain view shows.
+    """
+    ip, prefix = _address_prefix(info)
     payload = {
         "interface": _clean(info.interface),
-        "ip": _clean(info.ip),
+        "ip": ip,
+        "prefix": prefix,
         "gateway": _clean(info.gateway),
         "subnet": _clean(info.subnet),
     }
@@ -723,21 +732,33 @@ def _noun(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
 
+def _address_prefix(info: NetInfo) -> tuple[str | None, int | None]:
+    """Cleaned address and the prefix length plain text appends to it.
+
+    The prefix is set only when the subnet parses and uses the same IP version.
+    """
+    ip = _clean(info.ip)
+    subnet = _clean(info.subnet)
+    if not ip or not subnet:
+        return ip, None
+    try:
+        host = ipaddress.ip_address(ip)
+        network = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return ip, None
+    if host.version != network.version:
+        return ip, None
+    return ip, network.prefixlen
+
+
 def _ip_with_prefix(info: NetInfo) -> str:
     """Show ``address/prefix`` when the subnet uses the same IP version."""
-    if not info.ip:
+    ip, prefix = _address_prefix(info)
+    if not ip:
         return _NOT_AVAILABLE
-    shown = _text(info.ip, _NOT_AVAILABLE)
-    if not info.subnet:
-        return shown
-    try:
-        host = ipaddress.ip_address(info.ip)
-        network = ipaddress.ip_network(info.subnet, strict=False)
-    except ValueError:
-        return shown
-    if host.version != network.version:
-        return shown
-    return _text(f"{info.ip}/{network.prefixlen}", _NOT_AVAILABLE)
+    if prefix is None:
+        return ip
+    return f"{ip}/{prefix}"
 
 
 _clean = clean_text  # one shared sanitiser; see homenet.core._text

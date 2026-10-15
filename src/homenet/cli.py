@@ -29,7 +29,10 @@ import ipaddress
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 
+from homenet import __version__
 from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
@@ -60,6 +63,14 @@ from homenet.output import (
 
 BANNER = "Only scan networks you own or have permission to scan."
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
+
+
+def _package_version() -> str:
+    """Version from installed metadata, or the in-tree ``__version__`` fallback."""
+    try:
+        return distribution_version("homenet-cli")
+    except PackageNotFoundError:
+        return __version__
 
 
 class _JsonAwareParser(argparse.ArgumentParser):
@@ -616,6 +627,11 @@ def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
         ),
         formatter_class=_HelpFormatter,
         json_mode=json_mode,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.required = True

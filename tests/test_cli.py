@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 import pytest
 
+from homenet import __version__
 from homenet.cli import BANNER, main
 from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError, BaselineNotFoundError, diff_devices
@@ -40,13 +42,8 @@ from homenet.output import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Wording from homenet.core.checks.check_privileges (cap_net_raw+eip, no $(which)).
-PRIVILEGE_HINT = (
-    "Easiest: re-run with sudo, e.g. `sudo homenet scan`. "
-    "Advanced alternative: `sudo setcap cap_net_raw+eip /usr/bin/nmap` (use the path "
-    "from `command -v nmap`) and run nmap with --privileged. Be careful: this lets "
-    "every user on this computer send raw network packets through nmap, not just you."
-)
+# Wording from homenet.core.checks.check_privileges.
+PRIVILEGE_HINT = "Re-run with sudo, for example `sudo homenet devices`."
 
 
 def _load_toml(text: str) -> dict:
@@ -118,6 +115,22 @@ def test_usage_errors_exit_nonzero(argv):
     assert exc.value.code != 0
 
 
+@pytest.mark.parametrize("metadata", ["1.2.3", None])
+def test_version_flag_uses_installed_metadata(metadata, monkeypatch, capsys):
+    def fake(name: str) -> str:
+        assert name == "homenet-cli"
+        if metadata is None:
+            raise PackageNotFoundError(name)
+        return metadata
+
+    monkeypatch.setattr("homenet.cli.distribution_version", fake)
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    expected = metadata if metadata is not None else __version__
+    assert capsys.readouterr().out == f"homenet {expected}\n"
+
+
 def test_cli_source_does_not_spawn_processes():
     root = Path(checks.__file__).resolve().parent.parent
     for name in ("cli.py", "output.py"):
@@ -184,8 +197,8 @@ def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
         (
             [CheckResult("privileges", False, "normal user", PRIVILEGE_HINT, "warning")],
             0,
-            ["WARN  privileges", "setcap cap_net_raw+eip", "No errors. 1 warning."],
-            ["FAIL", "$(which nmap)"],
+            ["WARN  privileges", PRIVILEGE_HINT, "No errors. 1 warning."],
+            ["FAIL", "setcap"],
         ),
         (
             [
@@ -454,6 +467,9 @@ def test_whoami_json_prints_netinfo(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert captured.out == format_whoami_json(HOME) + "\n"
     assert captured.err == ""
+    loaded = json.loads(captured.out)
+    assert (loaded["ip"], loaded["prefix"]) == (HOME.ip, 24)
+    assert f"{loaded['ip']}/{loaded['prefix']}" in format_whoami(HOME)
     assert BANNER not in captured.out
     assert "This computer" not in captured.out
 
