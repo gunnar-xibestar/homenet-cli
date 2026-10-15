@@ -76,6 +76,18 @@ Open means a program is listening on that port.\
 def test_format_whoami_shows_address_with_prefix():
     info = NetInfo("wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24")
     assert format_whoami(info) == _WHOAMI
+    assert "Warning:" not in format_whoami(info)
+
+
+def test_format_whoami_warns_on_wsl_nat():
+    info = NetInfo("eth0", "172.22.240.5", "172.22.240.1", "172.22.240.0/20", wsl_nat=True)
+    text = format_whoami(info)
+    loaded = json.loads(format_whoami_json(info))
+    assert "Warning:" in text and loaded["wsl_nat"] is True
+    for blob in (text, loaded["warning"]):
+        assert "172.22.240.0/20" in blob
+        assert "may be the WSL virtual network" in blob
+        assert "networkingMode=mirrored" in blob and "wsl --shutdown" in blob
 
 
 @pytest.mark.parametrize(
@@ -494,7 +506,10 @@ def test_json_dumps_escapes_device_strings(device, wrapped, expected, snippets, 
 def test_whoami_json_matches_the_plain_address(info, expected):
     text = format_whoami_json(info)
     assert "\x1b" not in text
-    assert json.loads(text) == expected
+    loaded = json.loads(text)
+    assert loaded.pop("wsl_nat") is False
+    assert loaded.pop("warning") is None
+    assert loaded == expected
     shown = "not available" if expected["ip"] is None else expected["ip"]
     if expected["prefix"] is not None:
         shown = f"{shown}/{expected['prefix']}"

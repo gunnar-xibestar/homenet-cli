@@ -13,11 +13,12 @@ import shutil
 import socket
 import struct
 import subprocess  # noqa: S404 - argument lists only
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from homenet.core.commands import Command, run_command
+from homenet.core.wsl import wsl_nat_active
 
 CommandRunner = Callable[[Sequence[str]], str]
 FileReader = Callable[[str], str]
@@ -35,6 +36,8 @@ class NetInfo:
     ip: str | None
     gateway: str | None
     subnet: str | None
+    # True when WSL 2 NAT means scans see the virtual network, not the home LAN.
+    wsl_nat: bool = False
 
 
 ROUTE_ARGS = ("-j", "route", "show")
@@ -153,8 +156,15 @@ def parse_proc_route(text: str) -> tuple[str, str | None, str | None]:
     return ifname, None if gw == "0.0.0.0" else gw, subnet  # noqa: S104
 
 
-def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> NetInfo:
-    """Detect interface, IP, gateway and subnet. Raises :class:`NetInfoError`."""
+def detect(
+    run: CommandRunner = _run_ip,
+    read_file: FileReader = _read_file,
+    environ: Mapping[str, str] | None = None,
+) -> NetInfo:
+    """Detect interface, IP, gateway and subnet. Raises :class:`NetInfoError`.
+
+    ``wsl_nat`` is true when this is WSL and the active address is in 172.16.0.0/12.
+    """
     ip_ok = True
     try:
         routes = json.loads(run(list(ROUTE_ARGS)) or "[]")
@@ -167,7 +177,7 @@ def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> 
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise NetInfoError(f"Could not read addresses for {ifname}.") from exc
         ip, subnet = parse_interface_addr(addrs, ifname)
-        return NetInfo(ifname, ip, gateway, subnet)
+        return _with_wsl(NetInfo(ifname, ip, gateway, subnet), environ, read_file)
     try:
         text = read_file("/proc/net/route")
     except OSError as exc:
@@ -176,4 +186,11 @@ def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> 
             "Install iproute2: sudo apt install iproute2",
         ) from exc
     ifname, gateway, subnet = parse_proc_route(text)
-    return NetInfo(ifname, None, gateway, subnet)
+    return _with_wsl(NetInfo(ifname, None, gateway, subnet), environ, read_file)
+
+
+def _with_wsl(info: NetInfo, environ: Mapping[str, str] | None, read_file: FileReader) -> NetInfo:
+    """Copy ``info`` with ``wsl_nat`` set. Does not read files unless the address matches."""
+    if not wsl_nat_active(info.ip, info.subnet, environ=environ, read_text=read_file):
+        return info
+    return NetInfo(info.interface, info.ip, info.gateway, info.subnet, wsl_nat=True)

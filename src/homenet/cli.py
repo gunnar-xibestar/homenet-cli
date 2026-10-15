@@ -27,8 +27,9 @@ and the purpose go through :func:`homenet.output._clean`. With ``--json`` the
 hook does not print; the JSON object gains a top-level ``commands`` list instead.
 
 ``explain`` prints those commands and their purposes without running them.
-``--network`` (and ``--gateway`` for the router) supplies the home network so
-explain does not run ``ip``. Without them, it calls
+``explain`` takes ``--network``. ``explain router`` also takes ``--gateway``.
+The ``router`` command itself does not. Those options supply the home network
+so explain does not run ``ip``. Without them, it calls
 :func:`homenet.core.netinfo.detect`, which may run ``ip``. A bad ``--network``
 or a planner ``ValueError`` for a bad target is shown as the usual
 invalid-target error, with no traceback.
@@ -233,7 +234,10 @@ _COMMANDS: tuple[_Command, ...] = (
         "doctor",
         "Check that tools and permissions are ready",
         "Check that nmap, the ip command, and ping are installed, that you are allowed "
-        "to scan, and that this computer has a network route. Run this first if a scan fails.",
+        "to scan, and that this computer has a network route. Run this first if a scan fails.\n"
+        "\n"
+        "Doctor does not need sudo. A privileges warning tells you how to re-run a scan "
+        "so sudo can still find homenet.",
         "homenet doctor",
         json=True,
     ),
@@ -893,10 +897,11 @@ def _add_explain(subparsers, json_mode: bool) -> None:
         help="Show the real commands a command would run, without running them",
         description=(
             "Print each real command homenet would run, and why, without running it.\n"
-            "Pass --network to give the home network, and --gateway for the router.\n"
-            "That skips the ip lookup. Without them, explain looks the network up the\n"
-            "same way a real run does, which may run the `ip` command. It is not a scan.\n"
-            "If the lookup fails, homenet prints the usual error and fix hint.\n"
+            "Pass --network to give the home network. --gateway is only for\n"
+            "`explain router`. The router command does not take --gateway.\n"
+            "Those options skip the ip lookup. Without them, explain looks the network\n"
+            "up the same way a real run does, which may run the `ip` command. It is not\n"
+            "a scan. If the lookup fails, homenet prints the usual error and fix hint.\n"
             "\n"
             f"command is one of: {names}."
         ),
@@ -924,7 +929,10 @@ def _add_explain(subparsers, json_mode: bool) -> None:
     parser.add_argument(
         "--gateway",
         metavar="IP",
-        help="Router address, for example 192.168.1.1. With --network, skips the ip lookup.",
+        help=(
+            "Router address for explain router, for example 192.168.1.1. "
+            "The router command does not take this."
+        ),
     )
     parser.add_argument(
         "--json",

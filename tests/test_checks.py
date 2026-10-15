@@ -1,5 +1,8 @@
 import dataclasses
+import json
 import re
+import socket
+import struct
 
 import pytest
 
@@ -10,8 +13,11 @@ from homenet.core.checks import (
     check_ping,
     check_privileges,
     check_tool,
+    check_wsl,
+    resolve_homenet_program,
     run_all_checks,
 )
+from homenet.output import format_doctor_json
 
 ROUTE = (
     "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
@@ -62,13 +68,71 @@ def test_privileges_cap_net_raw():
     assert check_privileges(geteuid=lambda: 1000, read_text=lambda p: status, environ={}).ok
 
 
-def test_privileges_unprivileged_is_warning():
-    r = check_privileges(geteuid=lambda: 1000, read_text=lambda p: "CapEff:\t0\n", environ={})
+@pytest.mark.parametrize(
+    ("argv0", "found", "files", "expected"),
+    [
+        (
+            "/opt/venv/bin/homenet",
+            "/usr/bin/homenet",
+            {"/opt/venv/bin/homenet"},
+            "/opt/venv/bin/homenet",
+        ),
+        (
+            "/usr/bin/pytest",
+            "/opt/pipx/bin/homenet",
+            {"/opt/pipx/bin/homenet"},
+            "/opt/pipx/bin/homenet",
+        ),
+        ("/usr/bin/pytest", None, set(), None),
+        ("homenet", None, set(), None),
+        ("", None, set(), None),
+        ("homenet", "/other/homenet", None, "script"),
+    ],
+)
+def test_resolve_homenet_program(argv0, found, files, expected, tmp_path, monkeypatch):
+    is_file = None if files is None else files.__contains__
+    if expected == "script":
+        script = tmp_path / "homenet"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        expected = str(script.resolve())
+    got = resolve_homenet_program(
+        argv0=argv0,
+        which=lambda name: found if name == "homenet" else None,
+        is_file=is_file,
+    )
+    assert got == expected
+
+
+@pytest.mark.parametrize(
+    ("argv0", "found", "snippet"),
+    [
+        ("/opt/venv/bin/homenet", None, "sudo /opt/venv/bin/homenet devices"),
+        (
+            "/usr/bin/pytest",
+            "/home/ada/.local/bin/homenet",
+            "sudo /home/ada/.local/bin/homenet devices",
+        ),
+        ("pytest", None, 'sudo "$(command -v homenet)" devices'),
+    ],
+)
+def test_privileges_unprivileged_is_warning(argv0, found, snippet):
+    files = {"/opt/venv/bin/homenet", "/home/ada/.local/bin/homenet"}
+    r = check_privileges(
+        geteuid=lambda: 1000,
+        read_text=lambda p: "CapEff:\t0\n",
+        environ={},
+        argv0=argv0,
+        which=lambda name: found if name == "homenet" else None,
+        is_file=files.__contains__,
+    )
     assert not r.ok and r.severity == "warning"
-    assert r.fix_hint == "Re-run with sudo, for example `sudo homenet devices`."
-    assert "setcap" not in r.fix_hint
-    named = re.search(r"`sudo homenet ([a-z0-9-]+)`", r.fix_hint or "")
-    assert named is not None
+    assert snippet in (r.fix_hint or "")
+    assert "homenet doctor does not need sudo" in (r.fix_hint or "")
+    assert "sudo homenet doctor" not in (r.fix_hint or "")
+    assert "setcap" not in (r.fix_hint or "")
+    named = re.search(r"`sudo .* ([a-z0-9-]+)`", r.fix_hint or "")
+    assert named is not None and named.group(1) != "doctor"
     with pytest.raises(SystemExit) as exc:
         build_parser().parse_args([named.group(1), "--help"])
     assert exc.value.code == 0
@@ -163,3 +227,63 @@ def test_run_all_checks_nothing_installed(load_fixture):
         which=lambda n: None, geteuid=lambda: 0, read_text=_files(load_fixture), environ={}
     )
     assert [r.ok for r in results] == [False, False, True, True, False]
+
+
+_ANY = "0.0.0.0"  # noqa: S104 - default route and unspecified gateway in /proc/net/route
+
+
+def _le_hex(ip: str) -> str:
+    packed = struct.pack("<L", struct.unpack(">I", socket.inet_aton(ip))[0])
+    return packed.hex()
+
+
+def _proc_route(*rows: tuple[str, str, str, str]) -> str:
+    """Build /proc/net/route text. Each row is iface, destination, gateway, mask."""
+    lines = ["Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask"]
+    for iface, dest, gateway, mask in rows:
+        lines.append(
+            f"{iface}\t{_le_hex(dest)}\t{_le_hex(gateway)}\t0003\t0\t0\t0\t{_le_hex(mask)}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+WSL_ROUTE = _proc_route(
+    ("eth0", _ANY, "172.22.240.1", _ANY),
+    ("eth0", "172.22.240.0", _ANY, "255.255.240.0"),
+)
+
+
+@pytest.mark.parametrize("readable", [True, False], ids=["route", "unreadable"])
+def test_wsl_nat_check(readable, load_fixture):
+    def read(path):
+        if path == "/proc/net/route":
+            if not readable:
+                raise OSError(path)
+            return WSL_ROUTE
+        if path == "/sys/class/net/eth0/operstate":
+            return "up\n"
+        if path == "/proc/self/status":
+            return "CapEff:\t0000000000000000\n"
+        raise OSError(path)
+
+    result = check_wsl(read_text=read, environ={"WSL_DISTRO_NAME": "Ubuntu"})
+    if not readable:
+        assert result is None
+        return
+    assert result is not None
+    assert result.name == "wsl" and not result.ok and result.severity == "warning"
+    results = run_all_checks(
+        which=lambda n: f"/usr/bin/{n}",
+        run=_runner(load_fixture),
+        geteuid=lambda: 1000,
+        read_text=read,
+        environ={"WSL_DISTRO_NAME": "Ubuntu"},
+        argv0="/opt/venv/bin/homenet",
+        is_file=lambda path: path == "/opt/venv/bin/homenet",
+    )
+    assert [item.name for item in results] == ["nmap", "ip", "privileges", "network", "ping", "wsl"]
+    assert results[-1].severity == "warning"
+    assert not any(not item.ok and item.severity != "warning" for item in results)
+    loaded = json.loads(format_doctor_json(results))
+    assert loaded["ok"] is True
+    assert loaded["checks"][-1]["severity"] == "warning"
