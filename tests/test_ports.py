@@ -156,3 +156,26 @@ def test_all_risks_valid():
     from homenet.core import port_notes
 
     assert {r for _, r, _ in port_notes._NOTES.values()} <= set(RISK_LEVELS)
+
+
+def test_scan_services_single_host_only_by_default(load_fixture):
+    calls = []
+    scan = fake_scan(load_fixture, "nmap_services.xml", calls)
+    for target in (None, NET, "192.168.1.0/30"):
+        with pytest.raises(InvalidTargetError, match="single device|subnet"):
+            scan_services(target, local_network=NET, scan=scan)
+    assert calls == []
+    scan_services("192.168.1.1/32", local_network=NET, scan=scan)
+    scan_services(NET, local_network=NET, scan=scan, allow_subnet=True)
+    scan_services(local_network=NET, scan=scan, allow_subnet=True)
+    assert [c[-1] for c in calls] == ["192.168.1.1/32", NET, NET]
+
+
+def test_scan_services_allow_subnet_still_local_only(load_fixture):
+    with pytest.raises(TargetNotAllowedError):
+        scan_services(
+            "10.0.0.0/24",
+            local_network=NET,
+            allow_subnet=True,
+            scan=fake_scan(load_fixture, "nmap_services.xml", []),
+        )

@@ -84,9 +84,17 @@ def scan_services(
     timeout: float = DEFAULT_TIMEOUT,
     scan: ScanFn | None = None,
     ip_runner: Callable[[Sequence[str]], str] | None = None,
+    allow_subnet: bool = False,
 ) -> list[Device]:
     """Light service detection (``-sT -sV --version-light --top-ports N``).
 
     Never uses scripts, ``-A`` or ``-O``. Port.product / Port.version are filled in.
+    Only a single host is scanned unless ``allow_subnet=True``.
     """
-    return _scan("service", target, top_ports, local_network, timeout, scan, ip_runner)
+    net, local = resolve_local_target(target, local_network, ip_runner)  # local-only first
+    if not allow_subnet and (target is None or ipaddress.ip_network(net).num_addresses != 1):
+        raise InvalidTargetError(
+            f"{net} is a subnet; service detection only scans one device by default.",
+            "Give one IP, e.g. 192.168.1.10, or explicitly allow a subnet scan.",
+        )
+    return _scan("service", net, top_ports, local, timeout, scan, ip_runner)

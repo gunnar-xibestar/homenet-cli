@@ -108,3 +108,185 @@ def test_extract_title(body, title):
 def test_http_get_rejects_other_schemes():
     with pytest.raises(ValueError):
         http_get("file:///etc/passwd", 1, False)
+
+
+# ---- review fixes ----
+import http.client  # noqa: E402
+import io  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+from homenet.core import router as rt  # noqa: E402
+from homenet.core._text import _clean  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        http.client.BadStatusLine("garbage"),
+        http.client.IncompleteRead(b"x", 10),
+        http.client.RemoteDisconnected("closed"),
+        http.client.LineTooLong("header"),
+    ],
+)
+def test_http_exceptions_become_page_errors(exc):
+    fetch = FakeFetcher({"http://192.168.1.1/": exc})
+    r = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch)
+    assert not r.pages[0].reachable and type(exc).__name__ in r.pages[0].error
+
+
+def test_unexpected_exception_is_contained():
+    fetch = FakeFetcher({"http://192.168.1.1/": RuntimeError("boom")})
+    r = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch)
+    assert r.pages[0].error.startswith("unexpected error")
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("\x1b[31mRed\x1b[0m", "[31mRed[0m"),
+        ("a\x00b\x07c\x7f", "abc"),
+        ("x\u009bterm", "xterm"),
+        ("evil\u202egnp.exe", "evilgnp.exe"),
+        ("  a\n\tb  ", "a b"),
+        ("", None),
+        (None, None),
+        ("\x1b", None),
+        ("é ok 日本", "é ok 日本"),
+    ],
+)
+def test_clean(raw, clean):
+    assert _clean(raw) == clean
+
+
+def test_clean_caps_length():
+    assert len(_clean("a" * 500)) == 200
+
+
+def test_title_and_server_are_sanitized():
+    body = "<title>Router &#27;[2J&#x1b;]0;pwned\x07 Login</title>"
+    fetch = FakeFetcher(
+        {"http://192.168.1.1/": FetchResult(200, {"Server": "httpd\x1b[1m\r\nX-Evil: 1"}, body)}
+    )
+    page = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch).pages[0]
+    assert "\x1b" not in page.title and "\x07" not in page.title
+    assert page.title == "Router [2J]0;pwned Login"
+    assert page.server == "httpd[1m X-Evil: 1"
+
+
+def test_service_banners_sanitized():
+    from homenet.core.parser import parse_nmap_xml
+
+    xml = (
+        '<nmaprun><host><status state="up"/><address addr="192.168.1.9" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="open"/>'
+        '<service name="ssh" product="Open&#x9b;[2JSSH" version="9&#x202e;.2&#x9;"/></port>'
+        "</ports></host></nmaprun>"
+    )
+    (dev,) = parse_nmap_xml(xml)
+    assert (dev.ports[0].product, dev.ports[0].version) == ("Open[2JSSH", "9.2")
+
+
+# http_get with a fake opener
+
+
+class FakeResp(io.BytesIO):
+    def __init__(self, data, status=200, headers=None):
+        super().__init__(data)
+        self.status = status
+        self.headers = headers or {}
+        self.read_sizes = []
+
+    def read(self, n=-1):
+        self.read_sizes.append(n)
+        return super().read(n)
+
+
+class FakeOpener:
+    def __init__(self, resp=None, exc=None):
+        self.resp, self.exc, self.requests = resp, exc, []
+
+    def open(self, req, timeout):
+        self.requests.append((req, timeout))
+        if self.exc:
+            raise self.exc
+        return self.resp
+
+
+def test_http_get_caps_body():
+    resp = FakeResp(b"x" * (rt.MAX_BODY * 3), headers={"Server": "s"})
+    opener = FakeOpener(resp)
+    r = rt.http_get("http://192.168.1.1/", 2, False, opener=opener)
+    assert len(r.body) == rt.MAX_BODY and resp.read_sizes == [rt.MAX_BODY]
+    req, timeout = opener.requests[0]
+    assert req.get_method() == "GET" and timeout == 2
+    assert req.data is None and "Authorization" not in req.headers
+
+
+def test_http_get_error_responses():
+    err = urllib.error.HTTPError(
+        "http://192.168.1.1/", 401, "Unauthorized", {"Server": "mini"}, io.BytesIO(b"denied")
+    )
+    r = rt.http_get("http://192.168.1.1/", 1, False, opener=FakeOpener(exc=err))
+    assert (r.status, r.headers["Server"], r.body) == (401, "mini", "denied")
+
+
+def test_http_get_redirect_not_followed():
+    # The real opener never follows redirects: the handler refuses them.
+    opener = rt.build_router_opener(https=False, verify_tls=False)
+    assert any(isinstance(h, rt._NoRedirect) for h in opener.handlers)
+    assert rt._NoRedirect().redirect_request(None, None, 302, "Found", {}, "http://evil/") is None
+    # A 302 surfaces as an HTTPError response with its Location, not a second request.
+    err = urllib.error.HTTPError(
+        "http://192.168.1.1/", 302, "Found", {"Location": "http://8.8.8.8/"}, io.BytesIO(b"")
+    )
+    fake = FakeOpener(exc=err)
+    r = rt.http_get("http://192.168.1.1/", 1, False, opener=fake)
+    assert r.status == 302 and r.headers["Location"] == "http://8.8.8.8/"
+    assert len(fake.requests) == 1
+
+
+def test_router_opener_tls_settings():
+    import ssl
+
+    def ctx(opener):
+        (h,) = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        return h._context
+
+    assert ctx(rt.build_router_opener(True, False)).verify_mode == ssl.CERT_NONE
+    assert ctx(rt.build_router_opener(True, True)).verify_mode == ssl.CERT_REQUIRED
+
+
+# overall deadline
+
+
+def test_overall_deadline_with_slow_fake():
+    release = threading.Event()
+    calls = []
+
+    def slow(url, timeout, verify):
+        calls.append((url, timeout))
+        release.wait(5)
+        return FetchResult(200, {}, "")
+
+    start = time.monotonic()
+    r = check_router_admin("192.168.1.1", local_network=NET, fetch=slow, timeout=3, budget=0.3)
+    elapsed = time.monotonic() - start
+    release.set()
+    assert elapsed < 1.0
+    assert not r.admin_reachable
+    assert "time limit" in r.pages[0].error
+    assert all("time limit" in p.error for p in r.pages)
+    assert len(calls) == 1 and calls[0][1] <= 0.3  # per-request timeout capped by budget
+
+
+def test_budget_shared_across_ports():
+    def medium(url, timeout, verify):
+        time.sleep(0.15)
+        return FetchResult(200, {}, "<title>ok</title>")
+
+    r = check_router_admin("192.168.1.1", local_network=NET, fetch=medium, budget=0.25)
+    assert r.pages[0].reachable
+    assert not r.pages[2].reachable and "time limit" in r.pages[2].error
