@@ -36,10 +36,12 @@ class DeviceDiff:
     new: list[Device] = field(default_factory=list)
     missing: list[Device] = field(default_factory=list)
     changed: list[tuple[Device, Device]] = field(default_factory=list)  # (old, current)
+    # Same IP, different MAC: a different device (or MAC randomisation) now uses that IP.
+    mac_changed: list[tuple[Device, Device]] = field(default_factory=list)  # (old, current)
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.new or self.missing or self.changed)
+        return bool(self.new or self.missing or self.changed or self.mac_changed)
 
 
 def data_dir(environ: Mapping[str, str] | None = None, home: Path | None = None) -> Path:
@@ -108,7 +110,7 @@ def load_baseline(path: Path | None = None) -> list[Device]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise BaselineNotFoundError(
-            "No baseline saved yet.", "Run `homenet baseline save` first."
+            "No baseline saved yet.", "Run `homenet baseline` first."
         ) from exc
     except OSError as exc:
         raise BaselineError(f"Could not read {path}: {exc.strerror or exc}") from exc
@@ -116,25 +118,25 @@ def load_baseline(path: Path | None = None) -> list[Device]:
         data = json.loads(text)
     except ValueError as exc:
         raise BaselineError(
-            "The saved baseline is corrupted.", "Save a new one with `homenet baseline save`."
+            "The saved baseline is corrupted.", "Save a new one with `homenet baseline`."
         ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
         raise BaselineError(
             "The saved baseline has an unexpected format.",
-            "Save a new one with `homenet baseline save`.",
+            "Save a new one with `homenet baseline`.",
         )
     version = data.get("schema_version")
     if version != SCHEMA_VERSION:
         raise BaselineError(
             f"Baseline schema version {version!r} is not supported (expected {SCHEMA_VERSION}).",
-            "Save a new one with `homenet baseline save`.",
+            "Save a new one with `homenet baseline`.",
         )
     try:
         return [_device_from_dict(d) for d in data["devices"]]
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise BaselineError(
             "The saved baseline contains an invalid device entry.",
-            "Save a new one with `homenet baseline save`.",
+            "Save a new one with `homenet baseline`.",
         ) from exc
 
 
@@ -170,6 +172,12 @@ def diff_devices(baseline: Sequence[Device], current: Sequence[Device]) -> Devic
         else:
             unmatched_old.remove(old)
             pairs.append((old, cur))
+    for cur in list(result.new):
+        old = next((o for o in unmatched_old if o.ip == cur.ip), None)
+        if old is not None:
+            unmatched_old.remove(old)
+            result.new.remove(cur)
+            result.mac_changed.append((old, cur))
     result.missing = unmatched_old
     result.changed = [(o, c) for o, c in pairs if not _same(o, c)]
     return result

@@ -73,7 +73,7 @@ def test_load_fixture_v1(fixtures_dir):
 def test_missing_baseline(tmp_path):
     with pytest.raises(BaselineNotFoundError) as ei:
         load_baseline(tmp_path / "nope.json")
-    assert "baseline save" in ei.value.hint
+    assert "`homenet baseline`" in ei.value.hint
 
 
 @pytest.mark.parametrize(
@@ -117,11 +117,14 @@ def test_diff_mac_case_and_ip_fallback():
     assert [(o.mac, c.mac) for o, c in d.changed] == [(None, "11:22:33:44:55:66")]
 
 
-def test_diff_different_macs_same_ip_is_new_and_missing():
-    d = diff_devices(
-        [Device("192.168.1.5", "aa:aa:aa:aa:aa:aa")], [Device("192.168.1.5", "bb:bb:bb:bb:bb:bb")]
+def test_diff_same_ip_different_mac_is_mac_changed():
+    old, cur = (
+        Device("192.168.1.5", "aa:aa:aa:aa:aa:aa"),
+        Device("192.168.1.5", "bb:bb:bb:bb:bb:bb"),
     )
-    assert len(d.new) == 1 and len(d.missing) == 1 and d.changed == []
+    d = diff_devices([old], [cur])
+    assert d.mac_changed == [(old, cur)]
+    assert d.new == [] and d.missing == [] and d.changed == [] and d.has_changes
 
 
 def test_diff_no_changes():
