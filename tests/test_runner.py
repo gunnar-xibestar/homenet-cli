@@ -52,13 +52,30 @@ def test_build_args_rejects_bad_mode_or_top_ports(mode, top):
         build_args("192.168.1.5", mode, top, local_network=LOCAL)
 
 
+# The single source of truth for check_flags refusals (single flags and -sV combos).
 @pytest.mark.parametrize(
-    "flag",
-    ["-sV", "-A", "-O", "--script", "--script=vuln", "-sC", "-sU", "-p-", "-p1-65535", "--evil"],
+    "flags",
+    [
+        ["-sV"],
+        ["-A"],
+        ["-O"],
+        ["--script"],
+        ["--script=vuln"],
+        ["-sC"],
+        ["-sU"],
+        ["-p-"],
+        ["-p1-65535"],
+        ["--evil"],
+        ["--script-args", "x"],
+        ["--version-trace"],
+        ["-sV", "--version-all"],
+        ["-sV", "--version-intensity"],
+        ["-sV", "--version-light", "--script", "vuln"],
+    ],
 )
-def test_blocked_flags(flag):
+def test_blocked_flags(flags):
     with pytest.raises(DisallowedFlagError):
-        check_flags([flag])
+        check_flags(flags)
 
 
 @pytest.mark.parametrize(
@@ -85,11 +102,15 @@ def test_public_or_huge_refused_even_with_force(t):
         validate_target(t, force=True)
 
 
-@pytest.mark.parametrize("local", [LOCAL, None], ids=["other-subnet", "no-local-network"])
-def test_outside_local_subnet_needs_force(local):
+@pytest.mark.parametrize(
+    ("target", "local"),
+    [("10.0.5.0/24", LOCAL), ("192.168.0.0/16", None)],
+    ids=["rfc1918-24-other-subnet", "exactly-16-no-local-network"],
+)
+def test_outside_local_subnet_needs_force(target, local):
     with pytest.raises(TargetNotAllowedError, match="outside your local subnet"):
-        validate_target("10.0.5.0/24", local)
-    assert str(validate_target("10.0.5.0/24", local, force=True)) == "10.0.5.0/24"
+        validate_target(target, local)
+    assert str(validate_target(target, local, force=True)) == target
 
 
 def _fake_run(monkeypatch, result=None, exc=None):

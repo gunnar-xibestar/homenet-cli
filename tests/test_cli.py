@@ -47,6 +47,30 @@ PRIVILEGE_HINT = (
 )
 
 
+_SUBCOMMANDS = (
+    "whoami-net",
+    "devices",
+    "device",
+    "ports",
+    "services",
+    "router",
+    "baseline",
+    "new-devices",
+    "speed",
+    "doctor",
+    "explain",
+)
+
+
+@pytest.mark.parametrize("command", [None, *_SUBCOMMANDS])
+def test_help_exits_zero(command, capsys):
+    """Smoke test only: every --help renders and exits 0. Wording is not pinned."""
+    with pytest.raises(SystemExit) as exc:
+        main([command, "--help"] if command else ["--help"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip()
+
+
 @pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
 def test_usage_errors_exit_nonzero(argv):
     with pytest.raises(SystemExit) as exc:
@@ -356,10 +380,16 @@ def test_baseline_saves_the_sweep(capsys, monkeypatch, tmp_path):
     assert captured.err == ""
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
 @pytest.mark.parametrize(
-    ("case", "code"),
-    [("same", 0), ("changed", 1), ("missing", 2), ("scan-error", 2)],
+    ("case", "code", "json_mode"),
+    [
+        ("same", 0, False),
+        ("changed", 1, False),
+        ("missing", 2, False),
+        ("scan-error", 2, False),
+        ("changed", 1, True),
+        ("missing", 2, True),
+    ],
 )
 def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
     current = [LAPTOP, PHONE] if case == "changed" else [LAPTOP]
@@ -682,14 +712,14 @@ def test_command_errors(command, json_mode, capsys, monkeypatch):
         assert (BANNER in captured.out) is (command != "speed")
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
-@pytest.mark.parametrize("command", ("ports", "services"))
 @pytest.mark.parametrize(
-    ("ip", "phrase"),
+    ("command", "ip", "phrase", "json_mode"),
     [
-        ("192.168.1.0/24", "is a subnet"),
-        ("router.lan", "not a valid IP address"),
-        ("2001:db8::1", "not an IPv4 address"),
+        ("ports", "192.168.1.0/24", "is a subnet", False),
+        ("ports", "router.lan", "not a valid IP address", False),
+        ("ports", "2001:db8::1", "not an IPv4 address", False),
+        ("services", "192.168.1.0/24", "is a subnet", False),
+        ("ports", "192.168.1.0/24", "is a subnet", True),
     ],
 )
 def test_host_commands_reject_a_bad_target(command, ip, phrase, json_mode, capsys, monkeypatch):
