@@ -39,10 +39,15 @@ _WHOAMI_NOTES = (
 
 
 def format_error(message: str, hint: str | None = None) -> str:
-    """What went wrong, plus a fix when one is known."""
-    if hint:
-        return f"{message}\nFix: {hint}"
-    return message
+    """What went wrong, plus a fix when one is known.
+
+    Both strings are cleaned. A hint can repeat an interface name from the network.
+    """
+    text = _clean(message) or "Something went wrong."
+    fix = _clean(hint)
+    if fix:
+        return f"{text}\nFix: {fix}"
+    return text
 
 
 def format_whoami(info: NetInfo) -> str:
@@ -88,10 +93,11 @@ def format_devices(devices: Sequence[Device]) -> str:
 def format_device(device: Device) -> str:
     """Detail view for one device, including any ports it reported."""
     name = _clean(device.hostname)
-    title = f"{name} ({device.ip})" if name else f"Device {device.ip}"
+    ip = _text(device.ip, _UNKNOWN)
+    title = f"{name} ({ip})" if name else f"Device {ip}"
     rows = (
         ("Name", name or _UNKNOWN),
-        ("IP address", _text(device.ip, _UNKNOWN)),
+        ("IP address", ip),
         ("MAC address", _text(device.mac, _UNKNOWN)),
         ("Maker", _text(device.vendor, _UNKNOWN)),
     )
@@ -100,7 +106,12 @@ def format_device(device: Device) -> str:
         lines.append("No ports were reported for this device.")
         return "\n".join(lines)
     port_rows = [
-        (str(port.number), port.protocol, port.state, _text(port.service, _UNKNOWN))
+        (
+            str(port.number),
+            _text(port.protocol, _UNKNOWN),
+            _text(port.state, _UNKNOWN),
+            _text(port.service, _UNKNOWN),
+        )
         for port in sorted(device.ports, key=_port_sort_key)
     ]
     lines.append("")
@@ -114,16 +125,17 @@ def _ip_with_prefix(info: NetInfo) -> str:
     """Show ``address/prefix`` when the subnet uses the same IP version."""
     if not info.ip:
         return _NOT_AVAILABLE
+    shown = _text(info.ip, _NOT_AVAILABLE)
     if not info.subnet:
-        return info.ip
+        return shown
     try:
         host = ipaddress.ip_address(info.ip)
         network = ipaddress.ip_network(info.subnet, strict=False)
     except ValueError:
-        return info.ip
+        return shown
     if host.version != network.version:
-        return info.ip
-    return f"{info.ip}/{network.prefixlen}"
+        return shown
+    return _text(f"{info.ip}/{network.prefixlen}", _NOT_AVAILABLE)
 
 
 def _clean(value: str | None) -> str | None:

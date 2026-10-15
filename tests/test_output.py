@@ -203,6 +203,36 @@ def test_device_strings_replace_control_and_nonprintable_characters():
     assert "ht?tp" in c1
 
 
+def test_detail_title_ports_and_whoami_ip_are_cleaned():
+    detail = format_device(
+        Device(
+            "192.168.1.9\x1b[2J",
+            None,
+            "Ok",
+            "laptop",
+            [Port(80, "tc\x1bp", "op\x1ben", "http")],
+        )
+    )
+    assert "\x1b" not in detail
+    assert "laptop (192.168.1.9?[2J)" in detail
+    assert "tc?p" in detail
+    assert "op?en" in detail
+
+    missing_subnet = format_whoami(NetInfo("eth0", "10.0.0.5\x1b[31m", "10.0.0.1", None))
+    bad_subnet = format_whoami(NetInfo("eth0", "10.0.0.5\x1b[2J", "10.0.0.1", "nope"))
+    assert "\x1b" not in missing_subnet
+    assert "\x1b" not in bad_subnet
+    assert "10.0.0.5?[31m" in missing_subnet
+    assert "10.0.0.5?[2J" in bad_subnet
+
+
+def test_format_error_cleans_the_message_and_the_hint():
+    text = format_error("Could not read eth0\x1b[2J.", "Check wlan0\x1b]0;x\x07.")
+    assert "\x1b" not in text
+    assert "\x07" not in text
+    assert text == "Could not read eth0?[2J.\nFix: Check wlan0?]0;x?."
+
+
 def test_format_device_accepts_a_parsed_host(load_fixture):
     device = parse_nmap_xml(load_fixture("nmap_ports.xml"))[0]
     text = format_device(device)
