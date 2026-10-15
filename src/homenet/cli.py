@@ -20,6 +20,16 @@ on failure. Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
+
+``--show-cmd`` installs :func:`homenet.core.commands.set_command_hook`. Before
+each real command runs, the hook prints ``$ <display>`` to stderr. ``display``
+and the purpose go through :func:`homenet.output._clean`. With ``--json`` the
+hook does not print; the JSON object gains a top-level ``commands`` list instead.
+
+``explain`` prints those commands and their purposes without running them.
+It still calls :func:`homenet.core.netinfo.detect` when the command needs the
+home network or gateway, and that may run ``ip``. A planner ``ValueError`` for
+a bad target is shown as the usual invalid-target error, with no traceback.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from homenet import __version__
 from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
+from homenet.core.commands import planned_commands, set_command_hook
 from homenet.core.parser import Device, ParseError
 from homenet.core.runner import NmapError
 from homenet.output import (
@@ -49,6 +60,7 @@ from homenet.output import (
     format_doctor_json,
     format_error,
     format_error_json,
+    format_explain_json,
     format_ports,
     format_ports_json,
     format_router,
@@ -59,10 +71,17 @@ from homenet.output import (
     format_speed_json,
     format_whoami,
     format_whoami_json,
+    merge_commands,
 )
 
 BANNER = "Only scan networks you own or have permission to scan."
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
+_SHOW_CMD_HELP = "Show each real command on stderr as `$ command` before it runs."
+_SHOW_CMD_JSON_HELP = f"{_SHOW_CMD_HELP} With --json, add a commands list instead of those lines."
+_INVALID_TARGET_HINT = "Use an IP address or subnet like 192.168.1.0/24."
+_SCAN_COMMANDS = frozenset({"devices", "device", "baseline", "new-devices"})
+_HOST_COMMANDS = frozenset({"device", "ports", "services"})
+_NETWORK_COMMANDS = frozenset({*_SCAN_COMMANDS, "ports", "services", "router"})
 
 
 def _package_version() -> str:
@@ -284,7 +303,7 @@ def _format_doctor(results: list[CheckResult]) -> str:
 def _run_doctor(args: argparse.Namespace) -> int:
     results = checks.run_all_checks()
     if args.json:
-        print(format_doctor_json(results))
+        _print_ok(args, format_doctor_json(results))
     else:
         print(_format_doctor(results))
     return 1 if any(_is_error(result) for result in results) else 0
@@ -296,7 +315,7 @@ def _run_whoami(args: argparse.Namespace) -> int:
     except netinfo.NetInfoError as exc:
         return _fail(args, exc)
     if args.json:
-        print(format_whoami_json(info))
+        _print_ok(args, format_whoami_json(info))
     else:
         print(format_whoami(info))
     return 0
@@ -308,29 +327,37 @@ def _run_devices(args: argparse.Namespace) -> int:
     if found is None:
         return 1
     if args.json:
-        print(format_devices_json(found))
+        _print_ok(args, format_devices_json(found))
     else:
         print(format_devices(found))
     return 0
 
 
-def _run_device(args: argparse.Namespace) -> int:
-    _begin_scan(args)
+def _parse_device_ip(args: argparse.Namespace) -> tuple[str | None, int | None]:
+    """Return ``(address, None)`` or ``(None, exit code)`` after printing an error."""
     try:
         address = ipaddress.ip_address(args.ip.strip())
     except ValueError:
-        return _fail_message(
+        return None, _fail_message(
             args,
             f"{args.ip} is not a valid IP address.",
             "Use an address from `homenet devices`, for example 192.168.1.20.",
         )
     if address.version != 4:
-        return _fail_message(
+        return None, _fail_message(
             args,
             f"{args.ip} is not an IPv4 address.",
             "homenet looks up IPv4 addresses. Use one from `homenet devices`.",
         )
-    ok, found = _lookup_home(args, str(address))
+    return str(address), None
+
+
+def _run_device(args: argparse.Namespace) -> int:
+    _begin_scan(args)
+    address, code = _parse_device_ip(args)
+    if address is None:
+        return code if code is not None else 1
+    ok, found = _lookup_home(args, address)
     if not ok:
         return 1
     if found is None:
@@ -340,7 +367,7 @@ def _run_device(args: argparse.Namespace) -> int:
             "Run `homenet devices` to see which addresses answered.",
         )
     if args.json:
-        print(format_device_json(found))
+        _print_ok(args, format_device_json(found))
     else:
         print(format_device(found))
     return 0
@@ -374,7 +401,7 @@ def _run_new_devices(args: argparse.Namespace) -> int:
         return 2
     report = baseline.diff_devices(saved, found)
     if args.json:
-        print(format_diff_json(report))
+        _print_ok(args, format_diff_json(report))
     else:
         print(format_diff(report))
     return 1 if report.has_changes else 0
@@ -394,7 +421,7 @@ def _run_ports(args: argparse.Namespace) -> int:
         return code if code is not None else 1
     notes = port_notes.notes_for_ports(device.ports)
     if args.json:
-        print(format_ports_json(device, notes))
+        _print_ok(args, format_ports_json(device, notes))
     else:
         print(format_ports(device, notes))
     return 0
@@ -414,7 +441,7 @@ def _run_services(args: argparse.Namespace) -> int:
     if device is None:
         return code if code is not None else 1
     if args.json:
-        print(format_services_json(device))
+        _print_ok(args, format_services_json(device))
     else:
         print(format_services(device))
     return 0
@@ -427,7 +454,7 @@ def _run_router(args: argparse.Namespace) -> int:
     except NmapError as exc:
         return _fail(args, exc)
     if args.json:
-        print(format_router_json(result))
+        _print_ok(args, format_router_json(result))
     else:
         print(format_router(result))
     return 0
@@ -439,7 +466,7 @@ def _run_speed(args: argparse.Namespace) -> int:
     except speed.SpeedError as exc:
         return _fail(args, exc)
     if args.json:
-        print(format_speed_json(result))
+        _print_ok(args, format_speed_json(result))
     else:
         print(format_speed(result))
     return 0
@@ -508,9 +535,8 @@ def _begin_scan(args: argparse.Namespace) -> None:
     print()
 
 
-def _home_network() -> str:
-    """IPv4 subnet from netinfo, or raise :class:`NetInfoError` with a fix hint."""
-    info = netinfo.detect()
+def _subnet_from(info: netinfo.NetInfo) -> str:
+    """IPv4 subnet from ``info``, or raise :class:`NetInfoError` with a fix hint."""
     subnet = (info.subnet or "").strip()
     if not subnet:
         raise netinfo.NetInfoError(
@@ -530,6 +556,11 @@ def _home_network() -> str:
             "homenet scans IPv4 home networks. Connect with IPv4 and try again.",
         )
     return str(network)
+
+
+def _home_network() -> str:
+    """IPv4 subnet from netinfo, or raise :class:`NetInfoError` with a fix hint."""
+    return _subnet_from(netinfo.detect())
 
 
 def _scan_home(args: argparse.Namespace) -> list[Device] | None:
@@ -564,12 +595,164 @@ def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code
     """Beginner-friendly error. ``--json`` writes ``{"error", "fix_hint"}`` to stderr.
 
     ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
+    ``--show-cmd --json`` also includes the ``commands`` seen before the failure.
     """
     if getattr(args, "json", False):
-        print(format_error_json(message, hint), file=sys.stderr)
+        text = format_error_json(message, hint)
+        if getattr(args, "show_cmd", False):
+            text = merge_commands(text, _command_payloads(getattr(args, "_shown_commands", [])))
+        print(text, file=sys.stderr)
     else:
         print(format_error(message, hint))
     return code
+
+
+def _command_payloads(commands: Sequence[object]) -> list[dict]:
+    """``Command.to_dict()`` with displayed strings cleaned.
+
+    ``argv`` stays the real argument list. ``display`` and ``purpose`` go
+    through :func:`_clean` so a hostname or address cannot change the terminal.
+    """
+    payloads: list[dict] = []
+    for cmd in commands:
+        data = cmd.to_dict()
+        data["display"] = _clean(data.get("display")) or ""
+        data["purpose"] = _clean(data.get("purpose")) or ""
+        payloads.append(data)
+    return payloads
+
+
+def _print_ok(args: argparse.Namespace, text: str) -> None:
+    """Print a successful JSON document, adding ``commands`` when asked."""
+    if getattr(args, "show_cmd", False):
+        text = merge_commands(text, _command_payloads(getattr(args, "_shown_commands", [])))
+    print(text)
+
+
+def _capture_commands(args: argparse.Namespace) -> None:
+    """Remember every real command. Print ``$`` lines unless ``--json`` is set.
+
+    ``explain`` prints the planned commands itself, so it does not install the hook.
+    Detection inside explain can run ``ip``; that lookup is not listed twice.
+    """
+    captured: list = []
+    args._shown_commands = captured
+    if not getattr(args, "show_cmd", False) or args.command == "explain":
+        set_command_hook(None)
+        return
+
+    def hook(cmd: object) -> None:
+        captured.append(cmd)
+        if getattr(args, "json", False):
+            return
+        shown = _clean(cmd.display())
+        if shown:
+            print(f"$ {shown}", file=sys.stderr)
+
+    set_command_hook(hook)
+
+
+def _failure_code(name: str) -> int:
+    """Exit status the real command uses when it fails."""
+    return 2 if name == "new-devices" else 1
+
+
+def _invalid_target(target: str | None) -> tuple[str, str]:
+    """Same wording as a scan that rejects a target that is not an IP or subnet."""
+    if target:
+        message = f"{target!r} is not a valid IP address or subnet."
+    else:
+        message = "That is not a valid IP address or subnet."
+    return message, _INVALID_TARGET_HINT
+
+
+def _format_explained(commands: Sequence[object]) -> str:
+    blocks: list[str] = []
+    for item in _command_payloads(commands):
+        display = item["display"]
+        purpose = item["purpose"]
+        blocks.append(f"$ {display}\n  {purpose}" if purpose else f"$ {display}")
+    return "\n\n".join(blocks)
+
+
+def _explain_host(args: argparse.Namespace, name: str) -> tuple[str | None, int | None]:
+    """Validate an explain target with the same messages as the real command."""
+    target = args.target
+    if not target:
+        return None, _fail_message(
+            args,
+            f"{name} needs an IP address.",
+            f"For example: homenet explain {name} 192.168.1.20",
+            code=2,
+        )
+    saved = args.command
+    args.command = name
+    args.ip = target
+    try:
+        if name == "device":
+            return _parse_device_ip(args)
+        return _one_ipv4(args)
+    finally:
+        args.command = saved
+
+
+def _explain_params(name: str, ip: str | None, network: str | None, gateway: str | None) -> dict:
+    if name in _SCAN_COMMANDS:
+        return {"local_network": network}
+    if name == "ports":
+        return {"target": ip, "local_network": network, "top_ports": 100}
+    if name == "services":
+        return {
+            "target": ip,
+            "local_network": network,
+            "top_ports": 100,
+            "allow_subnet": False,
+        }
+    if name == "router":
+        return {"gateway": gateway, "local_network": network}
+    return {}
+
+
+def _run_explain(args: argparse.Namespace) -> int:
+    """Print the real commands for one homenet command. Does not scan."""
+    name = args.subject
+    code = _failure_code(name)
+    ip: str | None = None
+    if name in _HOST_COMMANDS:
+        ip, err = _explain_host(args, name)
+        if ip is None:
+            return err if err is not None else code
+    elif args.target:
+        return _fail_message(
+            args,
+            f"{name} does not take an IP address.",
+            f"Try `homenet explain {name}`.",
+            code=2,
+        )
+
+    network: str | None = None
+    gateway: str | None = None
+    if name in _NETWORK_COMMANDS:
+        try:
+            info = netinfo.detect()
+            network = _subnet_from(info)
+        except netinfo.NetInfoError as exc:
+            return _fail(args, exc, code)
+        gateway = (info.gateway or "").strip() or None
+
+    try:
+        planned = planned_commands(name, **_explain_params(name, ip, network, gateway))
+    except ValueError:
+        message, hint = _invalid_target(ip if name in _HOST_COMMANDS else None)
+        return _fail_message(args, message, hint, code)
+    except (NmapError, netinfo.NetInfoError, speed.SpeedError) as exc:
+        return _fail(args, exc, code)
+
+    if args.json:
+        print(format_explain_json(name, _command_payloads(planned)))
+    else:
+        print(_format_explained(planned))
+    return 0
 
 
 _HANDLERS = {
@@ -607,6 +790,7 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
             action="store_true",
             help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
         )
+    _add_show_cmd(parser, json=spec.json)
     handler = _HANDLERS.get(spec.name)
     if handler is not None:
         parser.set_defaults(handler=handler)
@@ -633,17 +817,72 @@ def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {_package_version()}",
     )
+    _add_show_cmd(parser, json=True)
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.required = True
     for spec in _COMMANDS:
         _add_command(subparsers, spec, json_mode)
+    _add_explain(subparsers, json_mode)
     return parser
+
+
+def _add_show_cmd(parser: argparse.ArgumentParser, *, json: bool = False) -> None:
+    parser.add_argument(
+        "--show-cmd",
+        action="store_true",
+        help=_SHOW_CMD_JSON_HELP if json else _SHOW_CMD_HELP,
+    )
+
+
+def _add_explain(subparsers, json_mode: bool) -> None:
+    names = ", ".join(spec.name for spec in _COMMANDS)
+    parser = subparsers.add_parser(
+        "explain",
+        help="Show the real commands a command would run, without running them",
+        description=(
+            "Print each real command homenet would run, and why, without running it.\n"
+            "When the command needs your home network or gateway, explain looks them up\n"
+            "the same way a real run does. That lookup may run the `ip` command.\n"
+            "It is not a scan. If the lookup fails, homenet prints the usual error and fix hint.\n"
+            "\n"
+            f"command is one of: {names}."
+        ),
+        epilog="Example:\n  homenet explain devices\n  homenet explain ports 192.168.1.1",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.json_mode = json_mode
+    parser.add_argument(
+        "subject",
+        metavar="command",
+        choices=[spec.name for spec in _COMMANDS],
+        help=f"Command to explain. One of: {names}",
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        metavar="IP",
+        help="IP address, when that command needs one. For example 192.168.1.20",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
+    )
+    _add_show_cmd(parser, json=True)
+    parser.set_defaults(handler=_run_explain)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code."""
-    raw = list(argv) if argv is not None else None
-    json_mode = "--json" in (raw if raw is not None else sys.argv[1:])
+    raw = list(argv) if argv is not None else list(sys.argv[1:])
+    json_mode = "--json" in raw
     parser = build_parser(json_mode=json_mode)
     args = parser.parse_args(raw)
-    return int(args.handler(args))
+    # A flag before the command is stored on the top-level parser, then the
+    # subparser default (False) replaces it. Honour whichever place it appeared.
+    args.show_cmd = bool(getattr(args, "show_cmd", False) or "--show-cmd" in raw)
+    try:
+        _capture_commands(args)
+        return int(args.handler(args))
+    finally:
+        set_command_hook(None)
