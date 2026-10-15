@@ -115,6 +115,7 @@ import http.client  # noqa: E402
 import io  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+import unicodedata  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
@@ -140,6 +141,14 @@ def test_unexpected_exception_is_contained():
     fetch = FakeFetcher({"http://192.168.1.1/": RuntimeError("boom")})
     r = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch)
     assert r.pages[0].error.startswith("unexpected error")
+
+
+@pytest.mark.parametrize("entity", ["&#27;", "&#x1b;", "&#7;"])
+def test_title_entities_cannot_inject_control_chars(entity):
+    body = f"<title>Router {entity}[2J{entity} Login</title>"
+    fetch = FakeFetcher({"http://192.168.1.1/": FetchResult(200, {}, body)})
+    title = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch).pages[0].title
+    assert title and not any(unicodedata.category(c) == "Cc" for c in title)
 
 
 def test_title_and_server_are_sanitized():
