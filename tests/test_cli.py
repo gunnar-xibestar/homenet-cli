@@ -432,7 +432,7 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
         monkeypatch.setattr(baseline, "load_baseline", load)
     else:
         _patch_detect(monkeypatch, HOME)
-        monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
+        monkeypatch.setattr(baseline, "load_baseline", lambda path=None: [LAPTOP])
     argv = ["new-devices", "--json"] if json_mode else ["new-devices"]
     assert main(argv) == code
     captured = capsys.readouterr()

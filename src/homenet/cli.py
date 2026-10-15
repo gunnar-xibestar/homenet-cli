@@ -21,6 +21,15 @@ on failure. Usage errors exit 2.
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
 
+On a terminal, a scan, sweep, or HTTP check shows a status line on stderr
+(a spinner and the elapsed time) and clears it when the step finishes.
+``--json`` and a non-terminal stderr leave that line off, so stdout stays
+intact. ``-v`` prints core ``on_step`` text to stderr. ``-vv`` also passes
+``stats_every=5`` and relays nmap progress. Displayed text goes through
+:func:`homenet.output._clean`. ``baseline`` calls
+:func:`homenet.core.baseline.take_baseline` and ``new-devices`` calls
+:func:`homenet.core.baseline.check_new_devices`.
+
 ``--show-cmd`` installs :func:`homenet.core.commands.set_command_hook`. Before
 each real command runs, the hook prints ``$ <display>`` to stderr. ``display``
 and the purpose go through :func:`homenet.output._clean`. With ``--json`` the
@@ -39,7 +48,10 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import sys
+import threading
+import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
@@ -77,7 +89,11 @@ from homenet.output import (
 )
 
 BANNER = "Only scan networks you own or have permission to scan."
+_FRAMES = ("|", "/", "-", "\\")
+_TICK = 0.1
+_STATS_EVERY = 5
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
+_VERBOSE_HELP = "Show each step on stderr. Repeat (-vv) to include nmap's progress."
 _SHOW_CMD_HELP = "Show each real command on stderr as `$ command` before it runs."
 _SHOW_CMD_JSON_HELP = f"{_SHOW_CMD_HELP} With --json, add a commands list instead of those lines."
 _INVALID_TARGET_HINT = "Use an IP address or subnet like 192.168.1.0/24."
@@ -377,12 +393,19 @@ def _run_device(args: argparse.Namespace) -> int:
 
 def _run_baseline(args: argparse.Namespace) -> int:
     _begin_scan(args)
-    found = _scan_home(args)
-    if found is None:
-        return 1
     try:
-        path = baseline.save_baseline(found)
-    except BaselineError as exc:
+        network = _home_network()
+    except netinfo.NetInfoError as exc:
+        return _fail(args, exc)
+    try:
+        with _activity(args, f"Scanning {network}…"):
+            path, found = baseline.take_baseline(
+                network,
+                local_network=network,
+                resolve_names=True,
+                **_scan_feedback(args),
+            )
+    except (netinfo.NetInfoError, NmapError, ParseError, BaselineError) as exc:
         return _fail(args, exc)
     count = len(found)
     noun = "device" if count == 1 else "devices"
@@ -394,14 +417,25 @@ def _run_baseline(args: argparse.Namespace) -> int:
 def _run_new_devices(args: argparse.Namespace) -> int:
     """Exit 0 when nothing changed, 1 when something changed, and 2 on error."""
     _begin_scan(args)
+    # A missing snapshot fails before any network lookup. The check loads it again.
     try:
-        saved = baseline.load_baseline()
+        baseline.load_baseline()
     except BaselineError as exc:
         return _fail(args, exc, code=2)
-    found = _scan_home(args)
-    if found is None:
-        return 2
-    report = baseline.diff_devices(saved, found)
+    try:
+        network = _home_network()
+    except netinfo.NetInfoError as exc:
+        return _fail(args, exc, code=2)
+    try:
+        with _activity(args, f"Scanning {network}…"):
+            report = baseline.check_new_devices(
+                network,
+                local_network=network,
+                resolve_names=True,
+                **_scan_feedback(args),
+            )
+    except (netinfo.NetInfoError, NmapError, ParseError, BaselineError) as exc:
+        return _fail(args, exc, code=2)
     if args.json:
         _print_ok(args, format_diff_json(report))
     else:
@@ -415,7 +449,8 @@ def _run_ports(args: argparse.Namespace) -> int:
     if target is None:
         return code if code is not None else 1
     try:
-        found = ports.scan_ports(target, top_ports=100)
+        with _activity(args, f"Scanning {target}…"):
+            found = ports.scan_ports(target, top_ports=100, **_scan_feedback(args))
     except (NmapError, ParseError) as exc:
         return _fail(args, exc)
     device, code = _answered(args, found, target)
@@ -436,7 +471,8 @@ def _run_services(args: argparse.Namespace) -> int:
     if target is None:
         return code if code is not None else 1
     try:
-        found = ports.scan_services(target, top_ports=100)
+        with _activity(args, f"Detecting services on {target}…"):
+            found = ports.scan_services(target, top_ports=100, **_scan_feedback(args))
     except (NmapError, ParseError) as exc:
         return _fail(args, exc)
     device, code = _answered(args, found, target)
@@ -452,7 +488,8 @@ def _run_services(args: argparse.Namespace) -> int:
 def _run_router(args: argparse.Namespace) -> int:
     _begin_scan(args)
     try:
-        result = router.check_router_admin()
+        with _activity(args, "Checking the router…"):
+            result = router.check_router_admin()
     except NmapError as exc:
         return _fail(args, exc)
     if args.json:
@@ -464,7 +501,8 @@ def _run_router(args: argparse.Namespace) -> int:
 
 def _run_speed(args: argparse.Namespace) -> int:
     try:
-        result = speed.measure_download()
+        with _activity(args, "Measuring download speed…"):
+            result = speed.measure_download()
     except speed.SpeedError as exc:
         return _fail(args, exc)
     if args.json:
@@ -529,6 +567,133 @@ def _match_host(found: Sequence[Device], target: str) -> Device | None:
     return None
 
 
+class _StatusLine:
+    """Spinner and elapsed time on stderr. One daemon thread, drawn with ``\\r``."""
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._stream = sys.stderr
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._width = 0
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._run, name="homenet-status", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        index = 0
+        while not self._stop.is_set():
+            elapsed = int(time.monotonic() - self._started)
+            frame = _FRAMES[index % len(_FRAMES)]
+            index += 1
+            text = f"{frame} {self._label} ({elapsed}s)"
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                self._paint(text)
+            if self._stop.wait(_TICK):
+                return
+
+    def _paint(self, text: str) -> None:
+        pad = " " * max(0, self._width - len(text))
+        self._stream.write(f"\r{text}{pad}")
+        self._stream.flush()
+        self._width = len(text)
+
+    def write_line(self, text: str) -> None:
+        """Clear the status line, then print ``text`` so the two do not share a row."""
+        with self._lock:
+            blank = " " * self._width
+            self._stream.write(f"\r{blank}\r{text}\n")
+            self._stream.flush()
+            self._width = 0
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+        with self._lock:
+            if self._width:
+                self._stream.write("\r" + " " * self._width + "\r")
+                self._stream.flush()
+                self._width = 0
+
+
+def _spinner_enabled(args: argparse.Namespace) -> bool:
+    """Progress is on by default, except for ``--json`` and a non-terminal stderr."""
+    if getattr(args, "json", False):
+        return False
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _verbose_count(argv: Sequence[str]) -> int:
+    """How many ``-v`` / ``--verbose`` flags were given, including ``-vv``."""
+    count = 0
+    for arg in argv:
+        if arg == "--":
+            break
+        if arg == "--verbose":
+            count += 1
+        elif (
+            len(arg) > 1
+            and arg.startswith("-")
+            and not arg.startswith("--")
+            and set(arg[1:]) == {"v"}
+        ):
+            count += len(arg) - 1
+    return count
+
+
+def _write_err(args: argparse.Namespace, text: str) -> None:
+    """Print one stderr line, clearing the status line first when it is up."""
+    status = getattr(args, "_status", None)
+    if status is not None:
+        status.write_line(text)
+    else:
+        print(text, file=sys.stderr)
+
+
+def _emit_verbose(args: argparse.Namespace, message: str) -> None:
+    text = _clean(message)
+    if text:
+        _write_err(args, text)
+
+
+def _scan_feedback(args: argparse.Namespace) -> dict:
+    """``on_step`` at ``-v``. ``stats_every`` and ``on_progress`` at ``-vv``."""
+    level = int(getattr(args, "verbose", 0) or 0)
+    if level <= 0:
+        return {}
+    feedback: dict = {"on_step": lambda message: _emit_verbose(args, message)}
+    if level >= 2:
+        feedback["stats_every"] = _STATS_EVERY
+        feedback["on_progress"] = lambda message: _emit_verbose(args, message)
+    return feedback
+
+
+@contextmanager
+def _activity(args: argparse.Namespace, label: str):
+    """Show ``label`` on stderr while ``yield`` runs, when the spinner is enabled."""
+    status = _StatusLine(_clean(label) or "Working…") if _spinner_enabled(args) else None
+    args._status = status
+    try:
+        if status is not None:
+            try:
+                sys.stdout.flush()
+            except OSError:
+                pass
+            status.start()
+        yield
+    finally:
+        args._status = None
+        if status is not None:
+            status.stop()
+
+
 def _begin_scan(args: argparse.Namespace) -> None:
     """Remind the user to scan only networks they own. JSON stays banner-free."""
     if getattr(args, "json", False):
@@ -569,8 +734,18 @@ def _scan_home(args: argparse.Namespace) -> list[Device] | None:
     """Sweep the netinfo subnet. None means the error was already printed."""
     try:
         network = _home_network()
-        return devices.sweep(network, local_network=network, resolve_names=True)
-    except (netinfo.NetInfoError, NmapError, ParseError) as exc:
+    except netinfo.NetInfoError as exc:
+        _fail(args, exc)
+        return None
+    try:
+        with _activity(args, f"Scanning {network}…"):
+            return devices.sweep(
+                network,
+                local_network=network,
+                resolve_names=True,
+                **_scan_feedback(args),
+            )
+    except (NmapError, ParseError) as exc:
         _fail(args, exc)
         return None
 
@@ -582,8 +757,19 @@ def _lookup_home(args: argparse.Namespace, ip: str) -> tuple[bool, Device | None
     """
     try:
         network = _home_network()
-        return True, devices.get_device(network, ip=ip, local_network=network, resolve_names=True)
-    except (netinfo.NetInfoError, NmapError, ParseError) as exc:
+    except netinfo.NetInfoError as exc:
+        _fail(args, exc)
+        return False, None
+    try:
+        with _activity(args, f"Scanning {network}…"):
+            return True, devices.get_device(
+                network,
+                ip=ip,
+                local_network=network,
+                resolve_names=True,
+                **_scan_feedback(args),
+            )
+    except (NmapError, ParseError) as exc:
         _fail(args, exc)
         return False, None
 
@@ -649,7 +835,7 @@ def _capture_commands(args: argparse.Namespace) -> None:
             return
         shown = _clean(cmd.display())
         if shown:
-            print(f"$ {shown}", file=sys.stderr)
+            _write_err(args, f"$ {shown}")
 
     set_command_hook(hook)
 
@@ -842,6 +1028,7 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
             action="store_true",
             help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
         )
+    _add_verbose(parser)
     _add_show_cmd(parser, json=spec.json)
     handler = _HANDLERS.get(spec.name)
     if handler is not None:
@@ -869,6 +1056,7 @@ def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {_package_version()}",
     )
+    _add_verbose(parser)
     _add_show_cmd(parser, json=True)
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.required = True
@@ -876,6 +1064,10 @@ def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
         _add_command(subparsers, spec, json_mode)
     _add_explain(subparsers, json_mode)
     return parser
+
+
+def _add_verbose(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-v", "--verbose", action="count", default=0, help=_VERBOSE_HELP)
 
 
 def _add_show_cmd(parser: argparse.ArgumentParser, *, json: bool = False) -> None:
@@ -931,6 +1123,7 @@ def _add_explain(subparsers, json_mode: bool) -> None:
         action="store_true",
         help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
     )
+    _add_verbose(parser)
     _add_show_cmd(parser, json=True)
     parser.set_defaults(handler=_run_explain)
 
@@ -944,6 +1137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # A flag before the command is stored on the top-level parser, then the
     # subparser default (False) replaces it. Honour whichever place it appeared.
     args.show_cmd = bool(getattr(args, "show_cmd", False) or "--show-cmd" in raw)
+    # A ``-v`` before the command and another after it are both real. Count the raw argv.
+    args.verbose = _verbose_count(raw)
     try:
         _capture_commands(args)
         return int(args.handler(args))

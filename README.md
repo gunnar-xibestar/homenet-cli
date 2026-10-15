@@ -122,6 +122,12 @@ Every command except `baseline` takes `--json`. JSON goes to stdout, with no saf
 
 Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `1` only when a check fails at error level. Warnings still exit `0`. `new-devices` exits `0` when nothing changed, `1` when a device is new, missing, changed, or has a different MAC address, and `2` when the command itself fails. A usage mistake, such as leaving off the IP address, exits `2`.
 
+### Progress
+
+In a terminal, homenet shows a status line on stderr while a scan, sweep, or HTTP check runs, such as `Scanning 192.168.1.0/24… (12s)`, and clears it when the step finishes. `--json`, and a run whose stderr is not a terminal, leave that line out so stdout stays intact.
+
+`-v` prints each step on stderr, such as `Parsed 7 hosts` and `Resolving names…`. `-vv` also shows nmap's progress every 5 seconds. The flag can go before or after the command.
+
 ### See the real command
 
 `homenet --show-cmd devices` still runs the command. Before each underlying command runs, homenet prints it to stderr, shell-quoted, as you would type it:
