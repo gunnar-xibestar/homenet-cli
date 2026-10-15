@@ -15,6 +15,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from homenet.core._text import clean_text
+
 CommandHook = Callable[["Command"], None]
 _hook: CommandHook | None = None
 
@@ -73,6 +75,67 @@ def run_command(cmd: Command, timeout: float) -> subprocess.CompletedProcess:
     )
 
 
+def emit(callback: Callable[[str], None] | None, message: str) -> None:
+    """Call a progress/step callback; its exceptions never break the caller."""
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:  # noqa: BLE001, S110 - a broken UI callback must not stop a scan
+        pass
+
+
+def stream_command(
+    cmd: Command, timeout: float, on_line: Callable[[str], None]
+) -> subprocess.CompletedProcess:
+    """Like :func:`run_command`, but streams stderr lines to ``on_line``.
+
+    stdout is collected in full (nmap's ``-oX -`` XML). Same argv, no shell;
+    on timeout the process is killed and ``TimeoutExpired`` is raised.
+    """
+    import threading
+
+    if cmd.kind != "exec":
+        raise ValueError("not an exec command")
+    notify(cmd)
+    out: list[str] = []
+    err: list[str] = []
+    with subprocess.Popen(  # noqa: S603 - argv from a build_*_command function
+        list(cmd.argv),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        shell=False,
+    ) as proc:  # closes both pipes and waits on exit, whatever happens
+
+        def read_stdout() -> None:
+            out.append(proc.stdout.read() or "")
+
+        def read_stderr() -> None:
+            for line in proc.stderr:
+                err.append(line)
+                cleaned = clean_text(line.rstrip("\n"))  # core never emits control chars
+                if cleaned:
+                    emit(on_line, cleaned)
+
+        readers = [
+            threading.Thread(target=read_stdout, daemon=True),
+            threading.Thread(target=read_stderr, daemon=True),
+        ]
+        for t in readers:
+            t.start()
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except BaseException:  # timeout, KeyboardInterrupt, anything: never leave nmap running
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            for t in readers:
+                t.join(timeout=1)
+    return subprocess.CompletedProcess(list(cmd.argv), returncode, "".join(out), "".join(err))
+
+
 # ---- planners: same validation as the real run, but nothing is executed ----
 
 
@@ -83,13 +146,19 @@ def plan_scan(
     force: bool = False,
     mode: str = "ping",
     top_ports: int = 100,
+    stats_every: int | None = None,
     geteuid=None,
     read_text=None,
 ) -> list[Command]:
     """The nmap sweep used by devices, device, baseline and new-devices."""
     import ipaddress
 
-    from homenet.core.runner import TargetNotAllowedError, build_scan_command, privileged_for
+    from homenet.core.runner import (
+        InvalidTargetError,
+        TargetNotAllowedError,
+        build_scan_command,
+        privileged_for,
+    )
 
     target = target if target is not None else local_network
     if target is None:
@@ -97,7 +166,13 @@ def plan_scan(
             "Could not detect your local network.",
             "Check you are connected (see `homenet whoami-net`) or give a subnet to scan.",
         )
-    net = str(ipaddress.ip_network(target, strict=False))
+    try:
+        net = str(ipaddress.ip_network(target, strict=False))
+    except ValueError as exc:
+        raise InvalidTargetError(
+            f"{target!r} is not a valid IP address or subnet.",
+            "Use an IP address or subnet like 192.168.1.0/24.",
+        ) from exc
     return [
         build_scan_command(
             net,
@@ -106,24 +181,40 @@ def plan_scan(
             local_network=local_network,
             force=force,
             privileged=privileged_for(mode, geteuid, read_text),
+            stats_every=stats_every,
         )
     ]
 
 
-def plan_ports(target=None, *, local_network=None, top_ports: int = 100) -> list[Command]:
+def plan_ports(
+    target=None, *, local_network=None, top_ports: int = 100, stats_every: int | None = None
+) -> list[Command]:
     from homenet.core.ports import build_ports_command
 
-    return [build_ports_command(target, top_ports=top_ports, local_network=local_network)]
+    return [
+        build_ports_command(
+            target, top_ports=top_ports, local_network=local_network, stats_every=stats_every
+        )
+    ]
 
 
 def plan_services(
-    target=None, *, local_network=None, top_ports: int = 100, allow_subnet: bool = False
+    target=None,
+    *,
+    local_network=None,
+    top_ports: int = 100,
+    allow_subnet: bool = False,
+    stats_every: int | None = None,
 ) -> list[Command]:
     from homenet.core.ports import build_services_command
 
     return [
         build_services_command(
-            target, top_ports=top_ports, local_network=local_network, allow_subnet=allow_subnet
+            target,
+            top_ports=top_ports,
+            local_network=local_network,
+            allow_subnet=allow_subnet,
+            stats_every=stats_every,
         )
     ]
 

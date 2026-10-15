@@ -9,7 +9,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Callable, Sequence
 
-from homenet.core.commands import Command
+from homenet.core.commands import Command, emit
 from homenet.core.devices import detect_local_network
 from homenet.core.parser import Device, parse_nmap_xml
 from homenet.core.runner import (
@@ -57,12 +57,43 @@ def resolve_local_target(
     return str(net), str(local_net)
 
 
-def _scan(mode, target, top_ports, local_network, timeout, scan, ip_runner) -> list[Device]:
+def _progress_kwargs(stats_every, on_progress) -> dict:
+    """Only pass the new options when set, so injected fakes keep their old signature."""
+    kw = {}
+    if stats_every is not None:
+        kw["stats_every"] = stats_every
+    if on_progress is not None:
+        kw["on_progress"] = on_progress
+    return kw
+
+
+def _scan(
+    mode,
+    target,
+    top_ports,
+    local_network,
+    timeout,
+    scan,
+    ip_runner,
+    stats_every=None,
+    on_progress=None,
+    on_step=None,
+) -> list[Device]:
     net, local = resolve_local_target(target, local_network, ip_runner)
+    what = "Detecting services" if mode == "service" else f"Scanning the top {top_ports} ports"
+    emit(on_step, f"{what} on {net}")
     result = (scan or run_scan)(
-        net, mode, top_ports, local_network=local, force=False, timeout=timeout
+        net,
+        mode,
+        top_ports,
+        local_network=local,
+        force=False,
+        timeout=timeout,
+        **_progress_kwargs(stats_every, on_progress),
     )
-    return parse_nmap_xml(result.xml)
+    devices = parse_nmap_xml(result.xml)
+    emit(on_step, f"Parsed {len(devices)} host{'s' if len(devices) != 1 else ''}")
+    return devices
 
 
 def _no_exec(args):
@@ -80,11 +111,17 @@ def _service_target(target, local_network, ip_runner, allow_subnet) -> tuple[str
 
 
 def build_ports_command(
-    target=None, *, top_ports: int = DEFAULT_TOP_PORTS, local_network=None
+    target=None,
+    *,
+    top_ports: int = DEFAULT_TOP_PORTS,
+    local_network=None,
+    stats_every: int | None = None,
 ) -> Command:
     """Validated top-ports nmap Command (same checks as :func:`scan_ports`; runs nothing)."""
     net, local = resolve_local_target(target, local_network, _no_exec)
-    return build_scan_command(net, "tcp-connect", top_ports, local_network=local)
+    return build_scan_command(
+        net, "tcp-connect", top_ports, local_network=local, stats_every=stats_every
+    )
 
 
 def build_services_command(
@@ -93,10 +130,13 @@ def build_services_command(
     top_ports: int = DEFAULT_TOP_PORTS,
     local_network=None,
     allow_subnet: bool = False,
+    stats_every: int | None = None,
 ) -> Command:
     """Validated light -sV nmap Command (same checks as :func:`scan_services`)."""
     net, local = _service_target(target, local_network, _no_exec, allow_subnet)
-    return build_scan_command(net, "service", top_ports, local_network=local)
+    return build_scan_command(
+        net, "service", top_ports, local_network=local, stats_every=stats_every
+    )
 
 
 def scan_ports(
@@ -107,9 +147,23 @@ def scan_ports(
     timeout: float = DEFAULT_TIMEOUT,
     scan: ScanFn | None = None,
     ip_runner: Callable[[Sequence[str]], str] | None = None,
+    stats_every: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_step: Callable[[str], None] | None = None,
 ) -> list[Device]:
     """TCP-connect scan (``-sT --top-ports N``) of one host or the local subnet."""
-    return _scan("tcp-connect", target, top_ports, local_network, timeout, scan, ip_runner)
+    return _scan(
+        "tcp-connect",
+        target,
+        top_ports,
+        local_network,
+        timeout,
+        scan,
+        ip_runner,
+        stats_every,
+        on_progress,
+        on_step,
+    )
 
 
 def scan_services(
@@ -121,6 +175,9 @@ def scan_services(
     scan: ScanFn | None = None,
     ip_runner: Callable[[Sequence[str]], str] | None = None,
     allow_subnet: bool = False,
+    stats_every: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_step: Callable[[str], None] | None = None,
 ) -> list[Device]:
     """Light service detection (``-sT -sV --version-light --top-ports N``).
 
@@ -128,4 +185,15 @@ def scan_services(
     Only a single host is scanned unless ``allow_subnet=True``.
     """
     net, local = _service_target(target, local_network, ip_runner, allow_subnet)
-    return _scan("service", net, top_ports, local, timeout, scan, ip_runner)
+    return _scan(
+        "service",
+        net,
+        top_ports,
+        local,
+        timeout,
+        scan,
+        ip_runner,
+        stats_every,
+        on_progress,
+        on_step,
+    )
