@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from homenet.core._text import DEFAULT_MAX_LEN, clean_text
+from homenet.core.commands import Command, http_command, notify
 from homenet.core.devices import detect_local_network
 from homenet.core.netinfo import NetInfoError, _run_ip, parse_default_route
 from homenet.core.runner import InvalidTargetError, TargetNotAllowedError
@@ -162,6 +163,36 @@ def _fetch_bounded(
     return box["result"], None
 
 
+def build_router_commands(
+    gateway, local_network, timeout: float = DEFAULT_TIMEOUT
+) -> list[Command]:
+    """Validated admin-page GET Commands for the gateway. Runs nothing.
+
+    Raises if the gateway is unknown or outside the default-route subnet.
+    """
+    if local_network is None or gateway is None:
+        raise TargetNotAllowedError(
+            "Could not detect your router (default gateway).",
+            "Check you are connected (see `homenet whoami-net`).",
+        )
+    try:
+        gw_ip = ipaddress.ip_address(gateway)
+    except ValueError as exc:
+        raise InvalidTargetError(f"{gateway!r} is not a valid IP address.") from exc
+    local_net = ipaddress.ip_network(local_network, strict=False)
+    if gw_ip.version != 4 or gw_ip not in local_net:
+        raise TargetNotAllowedError(
+            f"{gw_ip} is outside your local subnet ({local_net}); refusing to contact it.",
+            "Only your own router can be checked.",
+        )
+    cmds = []
+    for port, scheme in ADMIN_URLS:
+        default = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+        url = f"{scheme}://{gw_ip}/" if default else f"{scheme}://{gw_ip}:{port}/"
+        cmds.append(http_command(url, f"check for a router admin page on port {port}", timeout))
+    return cmds
+
+
 def check_router_admin(
     gateway: str | None = None,
     *,
@@ -181,27 +212,13 @@ def check_router_admin(
     """
     local = local_network if local_network is not None else detect_local_network(ip_runner)
     gw = gateway if gateway is not None else detect_gateway(ip_runner)
-    if local is None or gw is None:
-        raise TargetNotAllowedError(
-            "Could not detect your router (default gateway).",
-            "Check you are connected (see `homenet whoami-net`).",
-        )
-    try:
-        gw_ip = ipaddress.ip_address(gw)
-    except ValueError as exc:
-        raise InvalidTargetError(f"{gw!r} is not a valid IP address.") from exc
-    local_net = ipaddress.ip_network(local, strict=False)
-    if gw_ip.version != 4 or gw_ip not in local_net:
-        raise TargetNotAllowedError(
-            f"{gw_ip} is outside your local subnet ({local_net}); refusing to contact it.",
-            "Only your own router can be checked.",
-        )
+    commands = build_router_commands(gw, local, timeout)
+    gw_ip = str(ipaddress.ip_address(gw))  # validated by build_router_commands
     fetch = fetch or http_get
     deadline = time.monotonic() + max(0.0, budget)
-    result = RouterCheck(str(gw_ip))
-    for port, scheme in ADMIN_URLS:
-        default = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
-        url = f"{scheme}://{gw_ip}/" if default else f"{scheme}://{gw_ip}:{port}/"
+    result = RouterCheck(gw_ip)
+    for (port, scheme), cmd in zip(ADMIN_URLS, commands, strict=True):
+        url = cmd.url
         plain = scheme == "http"
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -209,6 +226,7 @@ def check_router_admin(
                 AdminPage(url, port, False, plain, error="skipped: time limit reached")
             )
             continue
+        notify(cmd)  # the hook sees exactly the URL fetched next
         r, err = _fetch_bounded(fetch, url, min(timeout, remaining), remaining)
         if err is not None:
             result.pages.append(AdminPage(url, port, False, plain, error=err))

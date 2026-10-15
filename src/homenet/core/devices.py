@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
+from homenet.core.commands import Command, notify, run_command
 from homenet.core.netinfo import _run_ip
 from homenet.core.parser import Device, parse_nmap_xml
 from homenet.core.runner import (
@@ -45,10 +46,15 @@ def reverse_dns(ip: str, lookup: Callable[[str], tuple] | None = None) -> str | 
     return name or None
 
 
-def _run_avahi(args: Sequence[str], timeout: float = MDNS_TIMEOUT) -> str:
-    proc = subprocess.run(  # noqa: S603 - fixed argument list, validated IP
-        list(args), capture_output=True, text=True, timeout=timeout, check=False
-    )
+def build_avahi_command(ip: str, path: str | None = None) -> Command:
+    """The single source of the mDNS lookup Command. Validates the IP."""
+    ip = str(ipaddress.ip_address(ip))
+    return Command((path or "avahi-resolve", "-a", ip), f"look up the mDNS name of {ip}")
+
+
+def _run_avahi(cmd: Command, timeout: float = MDNS_TIMEOUT) -> str:
+    """Default runner: executes exactly ``cmd.argv``."""
+    proc = run_command(cmd, timeout)
     return proc.stdout if proc.returncode == 0 else ""
 
 
@@ -69,8 +75,13 @@ def mdns_name(
     path = (which or shutil.which)("avahi-resolve")
     if path is None:
         return None
+    cmd = build_avahi_command(ip, path)
     try:
-        out = run([path, "-a", ip]) if run else _run_avahi([path, "-a", ip], timeout)
+        if run is None:
+            out = _run_avahi(cmd, timeout)
+        else:
+            notify(cmd)
+            out = run(list(cmd.argv))
     except (OSError, subprocess.SubprocessError):
         return None
     for line in (out or "").splitlines():

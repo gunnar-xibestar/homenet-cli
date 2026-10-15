@@ -13,6 +13,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from homenet.core.commands import Command, notify, run_command
+
 CAP_NET_RAW = 13
 
 # binary -> (version args, apt package)
@@ -34,11 +36,31 @@ class CheckResult:
     severity: str = "error"
 
 
-def _run_version(args: Sequence[str], timeout: float = 5) -> str:
-    proc = subprocess.run(  # noqa: S603 - fixed argument list
-        list(args), capture_output=True, text=True, timeout=timeout, check=False
-    )
+def _run_cmd(cmd: Command, timeout: float = 5) -> str:
+    """Default runner: executes exactly ``cmd.argv`` and returns stdout+stderr."""
+    proc = run_command(cmd, timeout)
     return (proc.stdout or "") + (proc.stderr or "")
+
+
+def _invoke(cmd: Command, run: Callable[[Sequence[str]], str] | None) -> str:
+    if run is None:
+        return _run_cmd(cmd)
+    notify(cmd)
+    return run(list(cmd.argv))
+
+
+def build_version_command(name: str, path: str | None = None) -> Command:
+    """The single source of the ``<tool> --version`` Command used by doctor."""
+    version_args, _ = _TOOLS.get(name, (("--version",), name))
+    return Command((path or name, *version_args), f"check {name} is installed and its version")
+
+
+def build_ping_command(target: str, path: str | None = None) -> Command:
+    """The single source of the gateway ping Command. Validates the IP."""
+    ip = str(ipaddress.ip_address(target))
+    return Command(
+        (path or "ping", "-c", "3", "-W", "1", "-q", ip), f"ping the gateway {ip} three times"
+    )
 
 
 def _ok(name: str, detail: str) -> CheckResult:
@@ -56,8 +78,7 @@ def check_tool(
 ) -> CheckResult:
     """Check ``name`` is on PATH and read its version."""
     which = which or shutil.which
-    run = run or _run_version
-    version_args, package = _TOOLS.get(name, (("--version",), name))
+    _, package = _TOOLS.get(name, (("--version",), name))
     path = which(name)
     if path is None:
         return CheckResult(
@@ -68,7 +89,7 @@ def check_tool(
             "error",
         )
     try:
-        out = run([path, *version_args])
+        out = _invoke(build_version_command(name, path), run)
     except (OSError, subprocess.SubprocessError) as exc:
         return _ok(name, f"found at {path} (version unknown: {exc})")
     m = re.search(r"\d+(?:\.\d+)+\w*", out)
@@ -153,6 +174,32 @@ def check_network(read_text: Callable[[str], str] | None = None) -> CheckResult:
     return _ok("network", f"default route via interface {iface} ({state})")
 
 
+def _gateway(read_text: Callable[[str], str] | None = None) -> str | None:
+    try:
+        route = _default_route((read_text or _read_text)("/proc/net/route"))
+    except OSError:
+        route = None
+    return route[1] if route else None
+
+
+def plan_check_commands(
+    gateway: str | None = None,
+    *,
+    which: Callable[[str], str | None] | None = None,
+    read_text: Callable[[str], str] | None = None,
+) -> list[Command]:
+    """Commands ``run_all_checks`` would execute (reads /proc only; runs nothing)."""
+    which = which or shutil.which
+    cmds = [build_version_command(n, which(n)) for n in ("nmap", "ip")]
+    gw = gateway if gateway is not None else _gateway(read_text)
+    if gw is not None:
+        try:
+            cmds.append(build_ping_command(gw, which("ping")))
+        except ValueError:
+            pass
+    return cmds
+
+
 def check_ping(
     target: str | None = None,
     which: Callable[[str], str | None] | None = None,
@@ -161,14 +208,8 @@ def check_ping(
 ) -> CheckResult:
     """Ping the default gateway (or ``target``) once and report packet loss."""
     which = which or shutil.which
-    run = run or (lambda args: _run_version(args, timeout=5))
-    read_text = read_text or _read_text
     if target is None:
-        try:
-            route = _default_route(read_text("/proc/net/route"))
-        except OSError:
-            route = None
-        target = route[1] if route else None
+        target = _gateway(read_text)
     if target is None:
         return CheckResult(
             "ping",
@@ -187,7 +228,7 @@ def check_ping(
             "ping", False, "ping is not installed", "sudo apt install iputils-ping", "error"
         )
     try:
-        out = run([path, "-c", "3", "-W", "1", "-q", target])
+        out = _invoke(build_ping_command(target, path), run)
     except (OSError, subprocess.SubprocessError) as exc:
         return CheckResult("ping", False, f"could not run ping: {exc}", None, "error")
     m = re.search(r"(\d+(?:\.\d+)?)% packet loss", out)

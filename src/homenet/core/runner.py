@@ -17,6 +17,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from homenet.core.commands import Command, run_command
+
 DEFAULT_TIMEOUT = 120.0
 MAX_PREFIX_LEN = 16  # refuse ranges larger than a /16
 MAX_TOP_PORTS = 1000
@@ -288,6 +290,51 @@ def build_args(
     return [nmap_path, *flags, str(net)]
 
 
+def privileged_for(
+    mode: str,
+    geteuid: Callable[[], int] | None = None,
+    read_text: Callable[[str], str] | None = None,
+) -> bool:
+    """Whether ``--privileged`` is needed; raises if ``mode`` needs root and we lack it."""
+    if mode not in PRIVILEGED_MODES:
+        return False
+    if not has_raw_socket_privileges(geteuid, read_text):
+        raise NmapPermissionError(
+            f"The {mode!r} scan needs root privileges.",
+            "Re-run with sudo, or use the default ping or tcp-connect mode.",
+        )
+    return (geteuid or os.geteuid)() != 0
+
+
+def build_scan_command(
+    target: str,
+    mode: str = DEFAULT_MODE,
+    top_ports: int = 100,
+    *,
+    local_network: ipaddress.IPv4Network | str | None = None,
+    force: bool = False,
+    privileged: bool = False,
+    nmap_path: str | None = None,
+) -> Command:
+    """The single source of the nmap Command (validated; runs nothing)."""
+    args = build_args(
+        target,
+        mode,
+        top_ports,
+        local_network=local_network,
+        force=force,
+        nmap_path=nmap_path or shutil.which("nmap") or "nmap",
+        privileged=privileged,
+    )
+    purpose = {
+        "ping": "find devices that are up (ping sweep)",
+        "tcp-connect": f"check the top {top_ports} TCP ports",
+        "syn": f"check the top {top_ports} TCP ports (SYN scan)",
+        "service": f"identify services on the top {top_ports} ports (light)",
+    }[mode]
+    return Command(tuple(args), purpose)
+
+
 def run_scan(
     target: str,
     mode: str = DEFAULT_MODE,
@@ -299,26 +346,26 @@ def run_scan(
     geteuid: Callable[[], int] | None = None,
     read_text: Callable[[str], str] | None = None,
 ) -> ScanResult:
-    """Validate, run nmap and return its XML output. Raises NmapError subclasses."""
-    privileged = False
-    if mode in PRIVILEGED_MODES:
-        if not has_raw_socket_privileges(geteuid, read_text):
-            raise NmapPermissionError(
-                f"The {mode!r} scan needs root privileges.",
-                "Re-run with sudo, or use the default ping or tcp-connect mode.",
-            )
-        privileged = (geteuid or os.geteuid)() != 0
-    args = build_args(
-        target, mode, top_ports, local_network=local_network, force=force, privileged=privileged
-    )
+    """Validate, run nmap and return its XML output. Raises NmapError subclasses.
+
+    Runs exactly ``build_scan_command(...).argv``; the command hook sees it first.
+    """
+    privileged = privileged_for(mode, geteuid, read_text)
     nmap = shutil.which("nmap")
+    # Validate before checking for nmap so bad targets are always refused first.
+    cmd = build_scan_command(
+        target,
+        mode,
+        top_ports,
+        local_network=local_network,
+        force=force,
+        privileged=privileged,
+        nmap_path=nmap or "nmap",
+    )
     if nmap is None:
         raise NmapNotFoundError("nmap is not installed.", "Try: sudo apt install nmap")
-    args[0] = nmap
     try:
-        proc = subprocess.run(  # noqa: S603 - argument list, validated input
-            args, capture_output=True, text=True, timeout=timeout, check=False, shell=False
-        )
+        proc = run_command(cmd, timeout)
     except subprocess.TimeoutExpired as exc:
         raise NmapTimeoutError(
             f"nmap did not finish within {timeout:g} seconds.",
@@ -333,4 +380,4 @@ def run_scan(
         raise NmapFailedError(
             f"nmap exited with code {proc.returncode}.", proc.returncode, stderr.strip()
         )
-    return ScanResult(tuple(args), proc.stdout or "", stderr, proc.returncode)
+    return ScanResult(cmd.argv, proc.stdout or "", stderr, proc.returncode)

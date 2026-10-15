@@ -17,6 +17,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from homenet.core.commands import Command, run_command
+
 CommandRunner = Callable[[Sequence[str]], str]
 FileReader = Callable[[str], str]
 
@@ -35,13 +37,30 @@ class NetInfo:
     subnet: str | None
 
 
+ROUTE_ARGS = ("-j", "route", "show")
+ADDR_ARGS = ("-j", "addr", "show")
+WHOAMI_IP_ARGS = (ROUTE_ARGS, ADDR_ARGS)
+_IP_PURPOSE = {
+    "route": "read the routing table (default route and gateway)",
+    "addr": "read interface addresses (IP and subnet)",
+}
+
+
+def build_ip_command(args: Sequence[str]) -> Command:
+    """The single source of every ``ip`` Command."""
+    args = tuple(args)
+    sub = args[1] if len(args) > 1 else ""
+    return Command(("ip", *args), _IP_PURPOSE.get(sub, "read network settings"))
+
+
 def _run_ip(args: Sequence[str], timeout: float = 5.0) -> str:
-    ip = shutil.which("ip")
-    if ip is None:
+    """Default ip runner: executes exactly ``build_ip_command(args).argv``."""
+    cmd = build_ip_command(args)
+    if shutil.which("ip") is None:
         raise FileNotFoundError("ip")
-    proc = subprocess.run(  # noqa: S603 - fixed argument list
-        [ip, *args], capture_output=True, text=True, timeout=timeout, check=True
-    )
+    proc = run_command(cmd, timeout)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, list(cmd.argv), proc.stdout)
     return proc.stdout
 
 
@@ -138,13 +157,13 @@ def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> 
     """Detect interface, IP, gateway and subnet. Raises :class:`NetInfoError`."""
     ip_ok = True
     try:
-        routes = json.loads(run(["-j", "route", "show"]) or "[]")
+        routes = json.loads(run(list(ROUTE_ARGS)) or "[]")
     except (OSError, subprocess.SubprocessError, ValueError):
         ip_ok = False
     if ip_ok:
         ifname, gateway = parse_default_route(routes)
         try:
-            addrs = json.loads(run(["-j", "addr", "show", "dev", ifname]) or "[]")
+            addrs = json.loads(run(list(ADDR_ARGS)) or "[]")  # filtered by ifname below
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise NetInfoError(f"Could not read addresses for {ifname}.") from exc
         ip, subnet = parse_interface_addr(addrs, ifname)
