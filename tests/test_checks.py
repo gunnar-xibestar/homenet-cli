@@ -24,18 +24,16 @@ def test_checkresult_contract():
     assert r.fix_hint is None and r.severity == "error"
 
 
-def test_tool_found_reads_version():
-    r = check_tool(
-        "nmap",
-        which=lambda n: "/usr/bin/nmap",
-        run=lambda a: "Nmap version 7.94SVN ( https://nmap.org )\n",
-    )
-    assert r.ok and "7.94SVN" in r.detail and r.fix_hint is None
-
-
-def test_tool_ip_version():
-    r = check_tool("ip", which=lambda n: "/usr/bin/ip", run=lambda a: "ip utility, iproute2-6.1.0")
-    assert r.ok and "6.1.0" in r.detail
+@pytest.mark.parametrize(
+    ("tool", "out", "version"),
+    [
+        ("nmap", "Nmap version 7.94SVN ( https://nmap.org )\n", "7.94SVN"),
+        ("ip", "ip utility, iproute2-6.1.0", "6.1.0"),
+    ],
+)
+def test_tool_found_reads_version(tool, out, version):
+    r = check_tool(tool, which=lambda n: f"/usr/bin/{n}", run=lambda a: out)
+    assert r.ok and version in r.detail and r.fix_hint is None
 
 
 def test_tool_missing_has_apt_hint():

@@ -106,6 +106,7 @@ import ipaddress
 import json
 from collections.abc import Sequence
 
+from homenet.core._text import clean_text
 from homenet.core.baseline import DeviceDiff
 from homenet.core.checks import CheckResult
 from homenet.core.devices import normalize_mac
@@ -737,18 +738,7 @@ def _ip_with_prefix(info: NetInfo) -> str:
     return _text(f"{info.ip}/{network.prefixlen}", _NOT_AVAILABLE)
 
 
-def _clean(value: str | None) -> str | None:
-    """Trim surrounding space and replace non-printable characters with ``?``.
-
-    Hostnames, vendors, and other device strings are untrusted network data.
-    ESC/CSI/OSC sequences, C0 and C1 controls, newlines, and similar characters
-    are turned into a visible ``?`` so they cannot change the terminal.
-    """
-    if value is None:
-        return None
-    visible = "".join(char if char.isprintable() else "?" for char in value)
-    stripped = visible.strip()
-    return stripped or None
+_clean = clean_text  # one shared sanitiser; see homenet.core._text
 
 
 def _text(value: str | None, missing: str) -> str:

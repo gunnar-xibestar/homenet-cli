@@ -8,7 +8,12 @@ from xml.etree.ElementTree import ParseError as XMLParseError  # noqa: S405 - ty
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
-from homenet.core._text import _clean
+from homenet.core._text import DEFAULT_MAX_LEN, clean_text
+
+
+def _clean(value: object) -> str | None:
+    """Shared sanitiser, capped for core data (titles, headers, banners)."""
+    return clean_text(value, DEFAULT_MAX_LEN)
 
 
 class ParseError(Exception):
