@@ -4,11 +4,11 @@ homenet is a beginner-friendly command for seeing what is on your home network. 
 
 > **Only scan networks you own or have permission to scan.**
 
-That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. Commands that accept `--json` leave the reminder out and print data only.
+That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. When you add `--json`, the reminder is left out and only data is printed.
 
 ## Install with pipx
 
-pipx keeps homenet in its own environment and puts the `homenet` command on your PATH. This repository is the package `homenet-cli`. It is not on PyPI. The PyPI project named `homenet` is a different tool, so install from this git URL.
+pipx keeps homenet in its own environment and puts the `homenet` command on your PATH. This repository is the package `homenet-cli`. It is not on PyPI. The PyPI project named `homenet` is a different tool. This git repository is private, so the install needs GitHub access.
 
 Get pipx from your distro, then run `pipx ensurepath` and open a new terminal:
 
@@ -27,12 +27,21 @@ sudo pacman -S python-pipx
 pipx ensurepath
 ```
 
-Install homenet:
+Install homenet with one of these. A plain https install fails until git has credentials.
 
 ```bash
+# Sign in once. git then uses gh as its credential helper.
+gh auth login
 pipx install "git+https://github.com/gunnarmail01-sketch/homenet-cli.git"
-homenet --help
+
+# Or install over SSH:
+pipx install "git+ssh://git@github.com/gunnarmail01-sketch/homenet-cli.git"
+
+# Or, from a clone of this repo:
+pipx install .
 ```
+
+Then run `homenet --help`.
 
 ### From a clone
 
@@ -44,7 +53,7 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-That installs an editable `homenet` plus the test tools. To install a clone for everyday use, run `pipx install .` in the checkout instead.
+That installs an editable `homenet` plus the test tools. For everyday use of a clone, `pipx install .` above is enough.
 
 ## You need nmap
 
@@ -60,11 +69,9 @@ If a tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo a
 
 ### Privileges
 
-Scans work as a normal user. MAC addresses, vendors, and SYN scans need extra privileges. When homenet itself is not root and does not have `CAP_NET_RAW`, doctor warns and prints this fix:
+Scans work as a normal user. No command runs a SYN scan. `services` uses `-sT -sV --version-light` and works without root. `ports` is a TCP connect scan (`-sT`) and works without root too. Sudo mainly adds MAC addresses and vendors to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
 
-> Easiest: re-run with sudo, e.g. `sudo homenet scan`. Advanced alternative: `sudo setcap cap_net_raw+eip /usr/bin/nmap` (use the path from `command -v nmap`) and run nmap with `--privileged`. Be careful: this lets every user on this computer send raw network packets through nmap, not just you.
-
-The hint's example is `sudo homenet scan`. Use sudo with the command you actually want, such as `sudo homenet devices`. For setcap, doctor's example path is `/usr/bin/nmap`. Use the path `command -v nmap` prints. A privileges warning still lets doctor exit 0. A missing tool or no network route is a real failure and exits 1.
+When doctor warns about privileges, re-run with sudo, for example `sudo homenet devices`. The advanced alternative is `sudo setcap cap_net_raw+eip` on the nmap path from `command -v nmap`. That lets every user on this computer send raw network packets through nmap. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1.
 
 ## Quick start
 
