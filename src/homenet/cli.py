@@ -1,7 +1,8 @@
 """Beginner-friendly command line for home network detection.
 
 ``doctor`` asks :mod:`homenet.core.checks` for results and prints them.
-This module does not spawn system commands itself.
+``whoami-net`` asks :mod:`homenet.core.netinfo` and prints them.
+This module does not spawn system commands itself. Core does.
 """
 
 from __future__ import annotations
@@ -10,8 +11,9 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from homenet.core import checks
+from homenet.core import checks, netinfo
 from homenet.core.checks import CheckResult
+from homenet.output import format_error, format_whoami
 
 BANNER = "Only scan networks you own or have permission to scan."
 
@@ -197,6 +199,16 @@ def _run_doctor(_args: argparse.Namespace) -> int:
     return 1 if any(_is_error(result) for result in results) else 0
 
 
+def _run_whoami(_args: argparse.Namespace) -> int:
+    try:
+        info = netinfo.detect()
+    except netinfo.NetInfoError as exc:
+        print(format_error(str(exc), exc.hint))
+        return 1
+    print(format_whoami(info))
+    return 0
+
+
 def _add_command(subparsers, spec: _Command) -> None:
     parser = subparsers.add_parser(
         spec.name,
@@ -213,6 +225,11 @@ def _add_command(subparsers, spec: _Command) -> None:
         )
     if spec.name == "doctor":
         parser.set_defaults(handler=_run_doctor)
+        return
+    # `devices` and `device` stay unimplemented until core discovery returns
+    # Device objects. format_devices and format_device in homenet.output are ready.
+    if spec.name == "whoami-net":
+        parser.set_defaults(handler=_run_whoami)
         return
     parser.set_defaults(handler=_not_implemented, command_name=spec.name, scan=spec.scan)
 

@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from homenet.cli import BANNER, main
-from homenet.core import checks
+from homenet.core import checks, netinfo
 from homenet.core.checks import CheckResult
+from homenet.core.netinfo import NetInfo, NetInfoError
+from homenet.output import format_error, format_whoami
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,7 +121,7 @@ def test_command_help_says_what_it_does_and_gives_an_example(command, capsys):
         assert "ping" in out
 
 
-@pytest.mark.parametrize("command", ("whoami-net", "devices", "router", "baseline", "new-devices"))
+@pytest.mark.parametrize("command", ("devices", "router", "baseline", "new-devices"))
 def test_scan_stub_prints_banner_and_exits_nonzero(command, capsys):
     code = main([command])
     assert code == 1
@@ -162,12 +164,68 @@ def test_missing_command_is_an_error():
 
 
 def test_cli_source_does_not_spawn_processes():
-    source = (
-        Path(checks.__file__).resolve().parent.parent.joinpath("cli.py").read_text(encoding="utf-8")
+    root = Path(checks.__file__).resolve().parent.parent
+    for name in ("cli.py", "output.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        assert "subprocess" not in source
+        assert "os.system" not in source
+        assert "Popen" not in source
+
+
+def _patch_detect(monkeypatch, result: NetInfo | NetInfoError) -> None:
+    def detect() -> NetInfo:
+        if isinstance(result, NetInfoError):
+            raise result
+        return result
+
+    monkeypatch.setattr(netinfo, "detect", detect)
+
+
+def test_whoami_net_prints_core_netinfo(capsys, monkeypatch):
+    info = NetInfo("wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24")
+    _patch_detect(monkeypatch, info)
+    assert main(["whoami-net"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_whoami(info) + "\n"
+    assert captured.err == ""
+    assert "192.168.1.100/24" in captured.out
+    assert "not implemented" not in captured.out
+
+
+def test_whoami_net_reports_a_missing_address(capsys, monkeypatch):
+    info = NetInfo("wlp2s0", None, "192.168.1.1", "192.168.1.0/24")
+    _patch_detect(monkeypatch, info)
+    assert main(["whoami-net"]) == 0
+    out = capsys.readouterr().out
+    assert "not available" in out
+    assert "This computer's own IP address was not available." in out
+    assert "192.168.1.1" in out
+
+
+def test_whoami_net_error_shows_a_hint_without_a_traceback(capsys, monkeypatch):
+    error = NetInfoError(
+        "No default route found; you may not be connected to a network.",
+        "Connect to Wi-Fi or Ethernet and try again.",
     )
-    assert "subprocess" not in source
-    assert "os.system" not in source
-    assert "Popen" not in source
+    _patch_detect(monkeypatch, error)
+    assert main(["whoami-net"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == format_error(str(error), error.hint) + "\n"
+    assert "Fix: Connect to Wi-Fi or Ethernet and try again." in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "NetInfoError" not in captured.out
+
+
+def test_whoami_net_error_without_a_hint(capsys, monkeypatch):
+    error = NetInfoError("Unexpected output from `ip -j route` (expected a list).")
+    _patch_detect(monkeypatch, error)
+    assert main(["whoami-net"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "Unexpected output from `ip -j route` (expected a list).\n"
+    assert "Fix:" not in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
 
 
 def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
