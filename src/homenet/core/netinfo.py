@@ -49,56 +49,99 @@ def _read_file(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def parse_default_route(routes: list[dict]) -> tuple[str, str | None]:
-    """Return (interface, gateway) of the lowest-metric default route."""
-    defaults = [r for r in routes if r.get("dst") == "default" and r.get("dev")]
+_NO_ROUTE = (
+    "No default route found; you may not be connected to a network.",
+    "Connect to Wi-Fi or Ethernet and try again.",
+)
+
+
+def _metric(route: dict) -> int:
+    m = route.get("metric")
+    return m if isinstance(m, int) and not isinstance(m, bool) else 0
+
+
+def parse_default_route(routes: object) -> tuple[str, str | None]:
+    """Return (interface, gateway) of the lowest-metric default route.
+
+    Malformed ``ip -j route`` output raises :class:`NetInfoError`, never a raw error.
+    """
+    if not isinstance(routes, list):
+        raise NetInfoError("Unexpected output from `ip -j route` (expected a list).")
+    defaults = [
+        r
+        for r in routes
+        if isinstance(r, dict)
+        and r.get("dst") == "default"
+        and isinstance(r.get("dev"), str)
+        and r["dev"]
+    ]
     if not defaults:
-        raise NetInfoError(
-            "No default route found; you may not be connected to a network.",
-            "Connect to Wi-Fi or Ethernet and try again.",
-        )
-    best = min(defaults, key=lambda r: r.get("metric", 0))
-    return best["dev"], best.get("gateway")
+        raise NetInfoError(*_NO_ROUTE)
+    best = min(defaults, key=_metric)
+    gateway = best.get("gateway")
+    return best["dev"], gateway if isinstance(gateway, str) and gateway else None
 
 
-def parse_interface_addr(addrs: list[dict], ifname: str) -> tuple[str | None, str | None]:
-    """Return (ip, subnet) for the interface's first IPv4 address."""
+def parse_interface_addr(addrs: object, ifname: str) -> tuple[str | None, str | None]:
+    """Return (ip, subnet) for the interface's first IPv4 address (None, None if absent)."""
+    if not isinstance(addrs, list):
+        raise NetInfoError("Unexpected output from `ip -j addr` (expected a list).")
     for iface in addrs:
-        if iface.get("ifname") != ifname:
+        if not isinstance(iface, dict) or iface.get("ifname") != ifname:
             continue
-        for a in iface.get("addr_info", []):
-            if a.get("family") == "inet" and "local" in a:
+        info = iface.get("addr_info")
+        for a in info if isinstance(info, list) else []:
+            if not isinstance(a, dict) or a.get("family") != "inet" or not a.get("local"):
+                continue
+            try:
                 net = ipaddress.ip_interface(f"{a['local']}/{a.get('prefixlen', 32)}").network
-                return a["local"], str(net)
+            except (ValueError, TypeError):
+                continue
+            return str(a["local"]), str(net)
     return None, None
 
 
-def parse_proc_route(text: str) -> tuple[str, str | None]:
-    """Parse /proc/net/route (hex little-endian) for the default route."""
-    best = None
+def _hex_ip(value: str) -> str:
+    return socket.inet_ntoa(struct.pack("<L", int(value, 16)))
+
+
+def parse_proc_route(text: str) -> tuple[str, str | None, str | None]:
+    """Parse /proc/net/route (little-endian hex) into (interface, gateway, subnet).
+
+    The subnet comes from the interface's on-link route (Destination + Mask).
+    """
+    rows = []
     for line in text.splitlines()[1:]:
         f = line.split()
-        if len(f) < 8 or f[1] != "00000000":
+        if len(f) < 8:
             continue
-        metric = int(f[6])
-        if best is None or metric < best[0]:
-            gw = socket.inet_ntoa(struct.pack("<L", int(f[2], 16)))
-            best = (metric, f[0], None if gw == "0.0.0.0" else gw)  # noqa: S104
-    if best is None:
-        raise NetInfoError(
-            "No default route found; you may not be connected to a network.",
-            "Connect to Wi-Fi or Ethernet and try again.",
-        )
-    return best[1], best[2]
+        try:
+            rows.append((f[0], _hex_ip(f[1]), _hex_ip(f[2]), int(f[6]), _hex_ip(f[7])))
+        except (ValueError, struct.error):
+            continue
+    defaults = [r for r in rows if r[1] == "0.0.0.0"]  # noqa: S104
+    if not defaults:
+        raise NetInfoError(*_NO_ROUTE)
+    ifname, _, gw, _, _ = min(defaults, key=lambda r: r[3])
+    subnet = None
+    for name, dest, _gw, _m, mask in sorted(rows, key=lambda r: r[3]):
+        if name == ifname and dest != "0.0.0.0":  # noqa: S104
+            try:
+                subnet = str(ipaddress.ip_network(f"{dest}/{mask}"))
+            except ValueError:
+                continue
+            break
+    return ifname, None if gw == "0.0.0.0" else gw, subnet  # noqa: S104
 
 
 def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> NetInfo:
     """Detect interface, IP, gateway and subnet. Raises :class:`NetInfoError`."""
+    ip_ok = True
     try:
         routes = json.loads(run(["-j", "route", "show"]) or "[]")
-    except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError):
-        routes = None
-    if routes is not None:
+    except (OSError, subprocess.SubprocessError, ValueError):
+        ip_ok = False
+    if ip_ok:
         ifname, gateway = parse_default_route(routes)
         try:
             addrs = json.loads(run(["-j", "addr", "show", "dev", ifname]) or "[]")
@@ -113,5 +156,5 @@ def detect(run: CommandRunner = _run_ip, read_file: FileReader = _read_file) -> 
             "Could not read network information.",
             "Install iproute2: sudo apt install iproute2",
         ) from exc
-    ifname, gateway = parse_proc_route(text)
-    return NetInfo(ifname, None, gateway, None)
+    ifname, gateway, subnet = parse_proc_route(text)
+    return NetInfo(ifname, None, gateway, subnet)

@@ -34,12 +34,12 @@ def test_detect_falls_back_to_proc(load_fixture):
         raise FileNotFoundError("ip")
 
     info = detect(run=run, read_file=lambda p: load_fixture("proc_net_route.txt"))
-    assert info == NetInfo("wlp2s0", None, "192.168.1.1", None)
+    assert info == NetInfo("wlp2s0", None, "192.168.1.1", "192.168.1.0/24")
 
 
 def test_detect_no_route():
     with pytest.raises(NetInfoError, match="No default route"):
-        detect(run=lambda a: "[]")
+        detect(run=lambda a: "[]", read_file=_no_files)
 
 
 def test_detect_nothing_available():
@@ -78,3 +78,81 @@ def test_proc_route_no_default():
 def test_bad_json_falls_back(load_fixture):
     info = detect(run=lambda a: "{not json", read_file=lambda p: load_fixture("proc_net_route.txt"))
     assert info.interface == "wlp2s0"
+
+
+def test_proc_route_subnet(load_fixture):
+    assert parse_proc_route(load_fixture("proc_net_route.txt")) == (
+        "wlp2s0",
+        "192.168.1.1",
+        "192.168.1.0/24",
+    )
+
+
+def test_proc_route_garbage_lines_ignored(load_fixture):
+    text = load_fixture("proc_net_route.txt") + "junk zz yy 1 2 3 x 4\nshort\n"
+    assert parse_proc_route(text)[0] == "wlp2s0"
+
+
+def test_null_or_missing_metric():
+    routes = [
+        {"dst": "default", "gateway": "192.168.1.1", "dev": "wlp2s0", "metric": None},
+        {"dst": "default", "gateway": "10.0.0.1", "dev": "eth0", "metric": 100},
+        {"dst": "default", "dev": "tun0"},
+    ]
+    assert parse_default_route(routes)[0] in {"wlp2s0", "tun0"}
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        None,
+        {},
+        {"dst": "default"},
+        "default",
+        [None, 1, "x"],
+        [{"dst": "default"}],
+        [{"dst": "default", "dev": None}],
+        [{"dev": "eth0"}],
+    ],
+)
+def test_malformed_routes_raise_netinfoerror(routes):
+    with pytest.raises(NetInfoError):
+        parse_default_route(routes)
+
+
+@pytest.mark.parametrize(
+    "addrs",
+    [
+        [],
+        [None],
+        [{"ifname": "wlp2s0"}],
+        [{"ifname": "wlp2s0", "addr_info": None}],
+        [
+            {
+                "ifname": "wlp2s0",
+                "addr_info": [
+                    {"family": "inet"},
+                    None,
+                    {"family": "inet", "local": "x", "prefixlen": 24},
+                ],
+            }
+        ],
+    ],
+)
+def test_malformed_addrs(addrs):
+    assert parse_interface_addr(addrs, "wlp2s0") == (None, None)
+
+
+def test_addrs_not_a_list():
+    with pytest.raises(NetInfoError):
+        parse_interface_addr({"ifname": "wlp2s0"}, "wlp2s0")
+
+
+@pytest.mark.parametrize("route_json", ["null", "{}", '"x"', '[{"dst": "default"}]'])
+def test_detect_malformed_ip_json(route_json):
+    with pytest.raises(NetInfoError):
+        detect(run=lambda a: route_json, read_file=_no_files)
+
+
+def _no_files(path):
+    raise AssertionError(f"unexpected file read: {path}")
