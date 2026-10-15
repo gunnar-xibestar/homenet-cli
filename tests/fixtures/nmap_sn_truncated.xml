@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap -sn -oX - 192.168.1.0/24" start="1760518800" version="7.94" xmloutputversion="1.05">
+<host><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="192.168.1.1" addrtype="ipv4"/>
+<address addr="A4:2B:B0:11:22:33" addrtype="mac" vendor="TP-Li
