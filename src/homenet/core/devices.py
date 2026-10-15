@@ -7,13 +7,15 @@ quietly when it is not). All I/O is injectable. Never prints or exits.
 
 from __future__ import annotations
 
-import concurrent.futures as cf
 import dataclasses
 import ipaddress
 import json
+import queue
 import shutil
 import socket
 import subprocess  # noqa: S404 - argument lists only
+import threading
+import time
 from collections.abc import Callable, Sequence
 
 from homenet.core.netinfo import _run_ip
@@ -96,24 +98,46 @@ def resolve_all(
 ) -> dict[str, str | None]:
     """Resolve ``ips`` concurrently within an overall ``budget`` in seconds.
 
-    Lookups still running when the budget runs out are abandoned and map to None,
-    so a slow or broken DNS server cannot hang the caller.
+    Lookups still running when the budget runs out are abandoned and map to None.
+    Workers are daemon threads, so a hung lookup blocks neither the caller nor
+    process exit.
     """
     resolve = resolver or resolve_name
     names: dict[str, str | None] = dict.fromkeys(ips)
     if not ips:
         return names
-    pool = cf.ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(ips))))
-    try:
-        futures = {pool.submit(resolve, ip): ip for ip in ips}
-        done, _ = cf.wait(futures, timeout=max(0.0, budget))
-        for fut in done:
+    deadline = time.monotonic() + max(0.0, budget)
+    work: queue.SimpleQueue[str] = queue.SimpleQueue()
+    for ip in names:
+        work.put(ip)
+    results: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
+
+    def worker() -> None:
+        while time.monotonic() < deadline:
             try:
-                names[futures[fut]] = fut.result()
+                ip = work.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                name = resolve(ip)
             except Exception:  # noqa: BLE001 - a failed lookup just means "no name"
-                names[futures[fut]] = None
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+                name = None
+            results.put((ip, name))
+
+    # Daemon threads: a lookup stuck in gethostbyaddr can never block process exit.
+    for i in range(max(1, min(max_workers, len(names)))):
+        threading.Thread(target=worker, name=f"homenet-resolve-{i}", daemon=True).start()
+    pending = len(names)
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            ip, name = results.get(timeout=remaining)
+        except queue.Empty:
+            break
+        names[ip] = name
+        pending -= 1
     return names
 
 

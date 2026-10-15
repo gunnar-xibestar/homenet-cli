@@ -1,6 +1,10 @@
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +23,11 @@ from homenet.core.parser import Device
 from homenet.core.runner import NmapNotFoundError, ScanResult, TargetNotAllowedError, run_scan
 
 NET = "192.168.1.0/24"
+
+# Captured at import, before conftest's autouse guard replaces subprocess.Popen.
+# Only used to run the Python interpreter itself, never nmap/ping/ip.
+_REAL_POPEN = subprocess.Popen
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def fake_scan(load_fixture, calls=None):
@@ -260,3 +269,45 @@ def test_mdns_default_runner_gets_timeout(monkeypatch):
     monkeypatch.setattr(dev, "_run_avahi", fake_avahi)
     assert mdns_name("192.168.1.42", which=lambda n: "/x", timeout=0.5) is None
     assert seen == {"timeout": 0.5}
+
+
+def test_resolver_workers_are_daemon_threads():
+    seen = []
+
+    def record(ip):
+        seen.append(threading.current_thread().daemon)
+        return None
+
+    resolve_all(["192.168.1.1", "192.168.1.2"], record, budget=2)
+    assert seen == [True, True]
+
+
+def test_hung_lookup_does_not_block_process_exit():
+    code = textwrap.dedent(
+        """
+        import sys, threading, time
+        sys.path.insert(0, sys.argv[1])
+        from homenet.core.devices import resolve_all
+        hang = threading.Event()
+        start = time.monotonic()
+        names = resolve_all(["192.168.1.9"], lambda ip: hang.wait(30), budget=1.0)
+        assert names == {"192.168.1.9": None}
+        print(round(time.monotonic() - start, 2))
+        """
+    )
+    start = time.monotonic()
+    with _REAL_POPEN(
+        [sys.executable, "-c", code, str(SRC)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise
+    elapsed = time.monotonic() - start
+    assert proc.returncode == 0, stderr
+    assert float(stdout) < 2.0
+    assert elapsed < 10  # the fake lookup hangs for 30s; exit must not wait for it
