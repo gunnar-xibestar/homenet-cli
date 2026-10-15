@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+import sys
 
 import pytest
 
@@ -10,6 +11,8 @@ from homenet.core.commands import plan_ports, plan_scan, plan_services
 from homenet.core.runner import DisallowedFlagError, ScanResult, build_scan_command, check_flags
 
 NET = "192.168.1.0/24"
+# Captured at import, before conftest's autouse guard; only runs the Python interpreter.
+_REAL_POPEN = subprocess.Popen
 
 
 class FakePopen:
@@ -31,6 +34,14 @@ class FakePopen:
 
     def kill(self):
         self.killed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.stdout.close()
+        self.stderr.close()
+        self.wait()
 
 
 @pytest.fixture
@@ -171,3 +182,80 @@ def test_on_step_errors_are_ignored(load_fixture):
         resolve_names=False,
         on_step=broken,
     )
+
+
+class CapturingPopen(_REAL_POPEN):
+    last = None
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        CapturingPopen.last = self
+
+
+@pytest.fixture
+def real_child(monkeypatch):
+    monkeypatch.setattr(commands.subprocess, "Popen", CapturingPopen)
+    return CapturingPopen
+
+
+def _py(code):
+    return commands.Command((sys.executable, "-c", code), "test child")
+
+
+def test_real_child_pipes_closed_after_normal_exit(real_child):
+    lines = []
+    code = "import sys; print('<x/>'); sys.stderr.write('a\\x1b[2Jb\\n\\n')"
+    res = commands.stream_command(_py(code), 10, lines.append)
+    p = real_child.last
+    assert res.returncode == 0 and res.stdout.strip() == "<x/>"
+    assert p.stdout.closed and p.stderr.closed and p.returncode == 0
+    assert lines == ["a?[2Jb"]  # cleaned; blank line skipped
+
+
+def test_real_child_killed_and_closed_after_timeout(real_child):
+    with pytest.raises(subprocess.TimeoutExpired):
+        commands.stream_command(_py("import time; time.sleep(30)"), 0.5, lambda line: None)
+    p = real_child.last
+    assert p.returncode is not None  # killed and reaped
+    assert p.stdout.closed and p.stderr.closed
+
+
+def test_killed_on_any_exception(monkeypatch, popen):
+    def interrupted_wait(self, timeout=None):
+        if not self.killed:
+            raise KeyboardInterrupt
+        return -9
+
+    monkeypatch.setattr(FakePopen, "wait", interrupted_wait)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_scan(NET, local_network=NET, on_progress=lambda line: None)
+    p = popen.instances[0]
+    assert p.killed and p.stdout.closed and p.stderr.closed
+
+
+def test_streaming_nonzero_exit_keeps_returncode_and_stderr(monkeypatch, popen):
+    def failing(argv, **kw):
+        p = FakePopen(argv, **kw)
+        p.stdout, p.stderr = io.StringIO(""), io.StringIO("boom\n")
+        p.wait = lambda timeout=None: setattr(p, "returncode", 2) or 2
+        return p
+
+    monkeypatch.setattr(commands.subprocess, "Popen", failing)
+    lines = []
+    with pytest.raises(runner.NmapFailedError) as ei:
+        runner.run_scan(NET, local_network=NET, on_progress=lines.append)
+    assert ei.value.returncode == 2 and ei.value.stderr == "boom"
+    assert lines == ["boom"]
+
+
+def test_progress_lines_are_cleaned(monkeypatch, popen):
+    def hostile(argv, **kw):
+        p = FakePopen(argv, **kw)
+        p.stderr = io.StringIO("Stats\x1b]0;pwn\x07 50%\r\n\x9b2J\n")
+        return p
+
+    monkeypatch.setattr(commands.subprocess, "Popen", hostile)
+    lines = []
+    runner.run_scan(NET, local_network=NET, on_progress=lines.append)
+    assert lines == ["Stats?]0;pwn? 50%?", "?2J"]
+    assert not any(c in "".join(lines) for c in "\x1b\x07\x9b\r")

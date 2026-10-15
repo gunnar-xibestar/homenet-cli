@@ -15,6 +15,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from homenet.core._text import clean_text
+
 CommandHook = Callable[["Command"], None]
 _hook: CommandHook | None = None
 
@@ -96,39 +98,41 @@ def stream_command(
     if cmd.kind != "exec":
         raise ValueError("not an exec command")
     notify(cmd)
-    proc = subprocess.Popen(  # noqa: S603 - argv from a build_*_command function
+    out: list[str] = []
+    err: list[str] = []
+    with subprocess.Popen(  # noqa: S603 - argv from a build_*_command function
         list(cmd.argv),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         shell=False,
-    )
-    out: list[str] = []
-    err: list[str] = []
+    ) as proc:  # closes both pipes and waits on exit, whatever happens
 
-    def read_stdout() -> None:
-        out.append(proc.stdout.read() or "")
+        def read_stdout() -> None:
+            out.append(proc.stdout.read() or "")
 
-    def read_stderr() -> None:
-        for line in proc.stderr:
-            err.append(line)
-            emit(on_line, line.rstrip("\n"))
+        def read_stderr() -> None:
+            for line in proc.stderr:
+                err.append(line)
+                cleaned = clean_text(line.rstrip("\n"))  # core never emits control chars
+                if cleaned:
+                    emit(on_line, cleaned)
 
-    readers = [
-        threading.Thread(target=read_stdout, daemon=True),
-        threading.Thread(target=read_stderr, daemon=True),
-    ]
-    for t in readers:
-        t.start()
-    try:
-        returncode = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise
-    finally:
+        readers = [
+            threading.Thread(target=read_stdout, daemon=True),
+            threading.Thread(target=read_stderr, daemon=True),
+        ]
         for t in readers:
-            t.join(timeout=1)
+            t.start()
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except BaseException:  # timeout, KeyboardInterrupt, anything: never leave nmap running
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            for t in readers:
+                t.join(timeout=1)
     return subprocess.CompletedProcess(list(cmd.argv), returncode, "".join(out), "".join(err))
 
 
