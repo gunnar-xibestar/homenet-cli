@@ -41,10 +41,12 @@ def _read_text(path: str) -> str:
 
 def check_tool(
     name: str,
-    which: Callable[[str], str | None] = shutil.which,
-    run: Callable[[Sequence[str]], str] = _run_version,
+    which: Callable[[str], str | None] | None = None,
+    run: Callable[[Sequence[str]], str] | None = None,
 ) -> CheckResult:
     """Check ``name`` is on PATH and read its version."""
+    which = which or shutil.which
+    run = run or _run_version
     version_args, package = _TOOLS.get(name, (("--version",), name))
     path = which(name)
     if path is None:
@@ -69,12 +71,14 @@ def _has_cap_net_raw(status_text: str) -> bool:
 
 
 def check_privileges(
-    geteuid: Callable[[], int] = os.geteuid,
-    read_text: Callable[[str], str] = _read_text,
+    geteuid: Callable[[], int] | None = None,
+    read_text: Callable[[str], str] | None = None,
     environ: dict[str, str] | None = None,
 ) -> CheckResult:
     """Check for root, sudo or CAP_NET_RAW (needed for ARP/SYN scans and MACs)."""
     env = os.environ if environ is None else environ
+    geteuid = geteuid or os.geteuid
+    read_text = read_text or _read_text
     if geteuid() == 0:
         how = "via sudo" if env.get("SUDO_USER") else "as root"
         return CheckResult("privileges", True, f"running {how}; full scan detail available")
@@ -102,8 +106,9 @@ def _default_route(text: str) -> tuple[str, str] | None:
     return None
 
 
-def check_network(read_text: Callable[[str], str] = _read_text) -> CheckResult:
+def check_network(read_text: Callable[[str], str] | None = None) -> CheckResult:
     """Check there is a default route and that its interface is up."""
+    read_text = read_text or _read_text
     try:
         route = _default_route(read_text("/proc/net/route"))
     except OSError:
