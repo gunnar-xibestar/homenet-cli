@@ -18,10 +18,12 @@ CAP_NET_RAW = 13
 _PACKAGES = {
     "nmap": "nmap",
     "ip": "iproute2",
+    "ping": "iputils-ping",
 }
 _VERSION_FLAGS = {
     "nmap": "--version",
     "ip": "-V",
+    "ping": "-V",
 }
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)+\w*")
 _PRIVILEGE_HINT = (
@@ -35,12 +37,15 @@ class CheckResult:
 
     ``detail`` is the tool version when the tool is installed.
     ``fix_hint`` is set when ``ok`` is false.
+    ``severity`` is ``ok``, ``warning``, or ``error``. It defaults to ``error``
+    so a failed check stays fatal unless the caller marks it a warning.
     """
 
     name: str
     ok: bool
     detail: str
     fix_hint: str | None = None
+    severity: str = "error"
 
 
 def check_tool(name: str) -> CheckResult:
@@ -64,11 +69,13 @@ def check_tool(name: str) -> CheckResult:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return CheckResult(name, True, f"{name} found at {path} (version unknown: {exc})")
+        return CheckResult(
+            name, True, f"{name} found at {path} (version unknown: {exc})", severity="ok"
+        )
     text = (proc.stdout or "") + (proc.stderr or "")
     match = _VERSION_RE.search(text)
     version = match.group(0) if match else "unknown"
-    return CheckResult(name, True, f"{name} {version}")
+    return CheckResult(name, True, f"{name} {version}", severity="ok")
 
 
 def _has_cap_net_raw(status_text: str) -> bool:
@@ -93,19 +100,22 @@ def check_privileges() -> CheckResult:
             _PRIVILEGE_HINT,
         )
     if geteuid() == 0:
-        return CheckResult("privileges", True, "running as root; full scan detail available")
+        return CheckResult(
+            "privileges", True, "running as root; full scan detail available", severity="ok"
+        )
     try:
         status = Path("/proc/self/status").read_text(encoding="utf-8")
     except OSError:
         status = ""
     if _has_cap_net_raw(status):
-        return CheckResult("privileges", True, "CAP_NET_RAW is available")
+        return CheckResult("privileges", True, "CAP_NET_RAW is available", severity="ok")
     return CheckResult(
         "privileges",
         False,
         "running as a normal user: scans work, but MAC addresses and SYN scans "
         "need extra privileges",
         _PRIVILEGE_HINT,
+        severity="warning",
     )
 
 
@@ -163,9 +173,24 @@ def check_network() -> CheckResult:
         detail = f"default route via {gateway}, interface {iface} ({state})"
     else:
         detail = f"default route on interface {iface} ({state})"
-    return CheckResult("network", True, detail)
+    return CheckResult("network", True, detail, severity="ok")
+
+
+def check_ping() -> CheckResult:
+    """Stub: report whether ``ping`` is installed.
+
+    Packet-loss against the gateway is filled in by Net Core. A missing
+    ``ping`` is an error; finding it is severity ``ok``.
+    """
+    return check_tool("ping")
 
 
 def run_all_checks() -> list[CheckResult]:
-    """Run the nmap, ip, privileges, and network checks, in that order."""
-    return [check_tool("nmap"), check_tool("ip"), check_privileges(), check_network()]
+    """Run the nmap, ip, privileges, network, and ping checks, in that order."""
+    return [
+        check_tool("nmap"),
+        check_tool("ip"),
+        check_privileges(),
+        check_network(),
+        check_ping(),
+    ]

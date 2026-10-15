@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from homenet.core import checks
 from homenet.core.checks import (
     CheckResult,
     check_network,
+    check_ping,
     check_privileges,
     check_tool,
     run_all_checks,
 )
+
+
+def test_checkresult_severity_defaults_to_error():
+    fields = [field.name for field in dataclasses.fields(CheckResult)]
+    assert fields == ["name", "ok", "detail", "fix_hint", "severity"]
+    result = CheckResult("x", True, "d")
+    assert result.fix_hint is None
+    assert result.severity == "error"
 
 
 def test_missing_tool_has_fix_hint_and_is_silent(monkeypatch, capsys):
@@ -36,6 +47,7 @@ def test_tool_found_reports_version(monkeypatch, capsys):
     result = check_tool("nmap")
     assert result.ok is True
     assert result.fix_hint is None
+    assert result.severity == "ok"
     assert "7.94SVN" in result.detail
     assert capsys.readouterr() == ("", "")
 
@@ -49,6 +61,7 @@ def test_unprivileged_returns_hint_without_raising(monkeypatch, capsys):
     )
     result = check_privileges()
     assert result.ok is False
+    assert result.severity == "warning"
     assert result.fix_hint is not None
     assert "sudo" in result.fix_hint
     assert "setcap" in result.fix_hint
@@ -58,13 +71,16 @@ def test_unprivileged_returns_hint_without_raising(monkeypatch, capsys):
 
 def test_root_and_cap_net_raw_pass(monkeypatch):
     monkeypatch.setattr(checks.os, "geteuid", lambda: 0)
-    assert check_privileges().ok is True
+    root = check_privileges()
+    assert root.ok is True
+    assert root.severity == "ok"
 
     monkeypatch.setattr(checks.os, "geteuid", lambda: 1000)
     status = "Name:\tpython\nCapEff:\t0000000000002000\n"
     monkeypatch.setattr(checks.Path, "read_text", lambda _self, *_a, **_k: status)
     result = check_privileges()
     assert result.ok is True
+    assert result.severity == "ok"
     assert result.fix_hint is None
 
 
@@ -96,6 +112,7 @@ def test_network_missing_route_and_down_interface(monkeypatch):
     )
     missing = check_network()
     assert missing.ok is False
+    assert missing.severity == "error"
     assert missing.fix_hint
 
     route = (
@@ -120,6 +137,17 @@ def test_run_all_checks_order_and_silence(monkeypatch, capsys):
     monkeypatch.setattr(checks.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(checks.Path, "read_text", lambda _self, *_a, **_k: "CapEff:\t0\n")
     results = run_all_checks()
-    assert [result.name for result in results] == ["nmap", "ip", "privileges", "network"]
+    assert [result.name for result in results] == ["nmap", "ip", "privileges", "network", "ping"]
+    assert results[2].severity == "warning"
     assert all(isinstance(result, CheckResult) for result in results)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_ping_stub_is_a_tool_check(monkeypatch, capsys):
+    monkeypatch.setattr(checks.shutil, "which", lambda _name: None)
+    missing = check_ping()
+    assert missing.name == "ping"
+    assert missing.ok is False
+    assert missing.severity == "error"
+    assert missing.fix_hint == "sudo apt install iputils-ping"
     assert capsys.readouterr() == ("", "")

@@ -148,28 +148,53 @@ def _not_implemented(args: argparse.Namespace) -> int:
     return _NOT_IMPLEMENTED_EXIT
 
 
+def _label(result: CheckResult) -> str:
+    if result.severity == "warning":
+        return "WARN"
+    if result.ok:
+        return "PASS"
+    return "FAIL"
+
+
+def _is_error(result: CheckResult) -> bool:
+    """An error-level check failed. Warnings are not failures."""
+    return not result.ok and result.severity != "warning"
+
+
+def _summary(results: list[CheckResult]) -> str:
+    errors = sum(1 for result in results if _is_error(result))
+    warnings = sum(1 for result in results if result.severity == "warning")
+    if errors == 0 and warnings == 0:
+        noun = "check" if len(results) == 1 else "checks"
+        return f"All {len(results)} {noun} passed."
+    parts: list[str] = []
+    if errors:
+        noun = "check" if errors == 1 else "checks"
+        parts.append(f"{errors} {noun} failed.")
+    else:
+        parts.append("No errors.")
+    if warnings:
+        noun = "warning" if warnings == 1 else "warnings"
+        parts.append(f"{warnings} {noun}.")
+    return " ".join(parts)
+
+
 def _format_doctor(results: list[CheckResult]) -> str:
     lines = ["Home network doctor", ""]
     for result in results:
-        status = "PASS" if result.ok else "FAIL"
+        status = _label(result)
         lines.append(f"{status}  {result.name:<{_NAME_WIDTH}} {result.detail}")
-        if not result.ok and result.fix_hint:
+        if status != "PASS" and result.fix_hint:
             lines.append(f"      Fix: {result.fix_hint}")
-    failed = sum(1 for result in results if not result.ok)
     lines.append("")
-    if failed == 0:
-        noun = "check" if len(results) == 1 else "checks"
-        lines.append(f"All {len(results)} {noun} passed.")
-    else:
-        noun = "check" if failed == 1 else "checks"
-        lines.append(f"{failed} {noun} failed.")
+    lines.append(_summary(results))
     return "\n".join(lines)
 
 
 def _run_doctor(_args: argparse.Namespace) -> int:
     results = checks.run_all_checks()
     print(_format_doctor(results))
-    return 1 if any(not result.ok for result in results) else 0
+    return 1 if any(_is_error(result) for result in results) else 0
 
 
 def _add_command(subparsers, spec: _Command) -> None:

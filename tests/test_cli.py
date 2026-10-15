@@ -203,3 +203,49 @@ def test_doctor_exits_1_and_shows_fix_hints_when_a_check_fails(capsys, monkeypat
     assert "Fix: sudo apt install nmap" in out
     assert "setcap cap_net_raw+ep" in out
     assert "2 checks failed." in out
+
+
+def test_doctor_treats_warnings_as_non_fatal(capsys, monkeypatch):
+    _patch_checks(
+        monkeypatch,
+        [
+            CheckResult("nmap", True, "nmap 7.95", severity="ok"),
+            CheckResult("ip", True, "ip 6.1.0", severity="ok"),
+            CheckResult(
+                "privileges",
+                False,
+                "running as a normal user",
+                "Re-run with sudo, or sudo setcap cap_net_raw+ep $(which nmap)",
+                "warning",
+            ),
+            CheckResult("network", True, "default route via eth0", severity="ok"),
+            CheckResult("ping", True, "ping 3.12", severity="ok"),
+        ],
+    )
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "WARN  privileges" in out
+    assert "FAIL" not in out
+    assert "Fix: Re-run with sudo" in out
+    assert "No errors. 1 warning." in out
+
+
+def test_doctor_exits_1_only_for_error_severity(capsys, monkeypatch):
+    _patch_checks(
+        monkeypatch,
+        [
+            CheckResult("nmap", False, "nmap is not installed", "sudo apt install nmap", "error"),
+            CheckResult(
+                "privileges",
+                False,
+                "running as a normal user",
+                "Re-run with sudo",
+                "warning",
+            ),
+        ],
+    )
+    assert main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL  nmap" in out
+    assert "WARN  privileges" in out
+    assert "1 check failed. 1 warning." in out
