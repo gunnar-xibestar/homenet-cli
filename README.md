@@ -71,7 +71,13 @@ If a tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo a
 
 Scans work as a normal user. No command runs a SYN scan. `services` uses `-sT -sV --version-light` and works without root. `ports` is a TCP connect scan (`-sT`) and works without root too. Sudo mainly adds MAC addresses and vendors to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
 
-When doctor warns about privileges, re-run with sudo, for example `sudo homenet devices`. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1.
+When doctor warns about privileges, MAC addresses and makers need a scan run with sudo. `homenet doctor` does not need sudo. `sudo` resets `PATH`, so `sudo homenet devices` fails with "command not found" when homenet came from a venv or pipx. Use the absolute path doctor prints, or:
+
+```bash
+sudo "$(command -v homenet)" devices
+```
+
+A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
 
 ## Quick start
 
@@ -79,7 +85,7 @@ Run these three in order, on a network you are allowed to scan.
 
 ### `homenet doctor`
 
-You should see a heading, **Home network doctor**, then five lines in this order: `nmap`, `ip`, `privileges`, `network`, and `ping`. Each line starts with `PASS`, `WARN`, or `FAIL`. A warning or failure adds a `Fix:` line when doctor knows one. When every check is fine, the last line is `All 5 checks passed.` A warning (often privileges, or a gateway that ignores ping) still exits 0. Any `FAIL` exits 1.
+You should see a heading, **Home network doctor**, then five lines in this order: `nmap`, `ip`, `privileges`, `network`, and `ping`. Each line starts with `PASS`, `WARN`, or `FAIL`. A warning or failure adds a `Fix:` line when doctor knows one. When every check is fine, the last line is `All 5 checks passed.` A warning (often privileges, or a gateway that ignores ping) still exits 0. Any `FAIL` exits 1. Doctor does not need sudo. On WSL 2 NAT it can add a sixth line, `wsl`, which is also a warning.
 
 ### `homenet whoami-net`
 
@@ -90,7 +96,7 @@ You should see **This computer on your home network**, then four rows:
 - **Gateway**, usually your home router
 - **Home network**, the group of addresses your devices share (for example `192.168.1.0/24`)
 
-This reads your own route with `ip`. A missing value is `not available`. Exit 0 when the route can be read. If you are not connected, it tells you to connect to Wi-Fi or Ethernet.
+This reads your own route with `ip`. A missing value is `not available`. Exit 0 when the route can be read. If you are not connected, it tells you to connect to Wi-Fi or Ethernet. On WSL 2's virtual network it adds a warning that scans see that network, not the home LAN. The command still exits 0.
 
 ### `homenet devices`
 
@@ -139,8 +145,41 @@ $ nmap -sn -T4 -oX - 192.168.1.0/24
   find devices that are up (ping sweep)
 ```
 
-`explain devices --network 192.168.1.0/24` uses that subnet and does not run `ip`. For the router, add `--gateway 192.168.1.1` as well. Without those options, explain looks up your home network and gateway the same way a real run does, which may run the `ip` command. It is not a scan. A bad `--network` gets the usual invalid-target error and fix hint. `explain` accepts `--json`. `device`, `baseline`, and `new-devices` use the same ping sweep as `devices`.
+`explain devices --network 192.168.1.0/24` uses that subnet and does not run `ip`. `explain router` also takes `--gateway 192.168.1.1`. The `router` command does not take `--gateway`. Without those options, explain looks up your home network and gateway the same way a real run does, which may run the `ip` command. It is not a scan. A bad `--network` gets the usual invalid-target error and fix hint. `explain` accepts `--json`. `device`, `baseline`, and `new-devices` use the same ping sweep as `devices`.
 
 ## Speed contacts Cloudflare
 
 `homenet speed` times one short HTTPS download and prints megabits per second, the number of bytes, and how long it took. The sample comes from **speed.cloudflare.com**: `https://speed.cloudflare.com/__down?bytes=1000000` (one million bytes). The command says this is a short download from Cloudflare (speed.cloudflare.com), not a full speed test. Your computer must be able to reach that host.
+
+## Troubleshooting
+
+### `sudo: homenet: command not found` in a venv or pipx
+
+`sudo` keeps a short `PATH`. It does not see `homenet` when that command lives in a virtualenv or in pipx's bin directory. `homenet doctor` does not need sudo, and running `sudo homenet doctor` fails the same way.
+
+When you want MAC addresses and makers, run the scan through the program file itself. Doctor prints a line you can copy. You can also look the command up in your own shell, before sudo starts:
+
+```bash
+sudo "$(command -v homenet)" devices
+```
+
+`command -v` prints the absolute path, and the quotes hand that path to sudo. The same form works for `device` and `baseline`.
+
+### WSL 2 shows a virtual network, not the home LAN
+
+WSL 2 normally puts Linux on a private network inside `172.16.0.0/12`. `homenet whoami-net` and `homenet doctor` warn when they see that. Scans then list the virtual network, not the phones and computers on your home LAN. The warning does not change the exit code.
+
+To use the same network as Windows, add this to `%UserProfile%\.wslconfig` (that file is on the Windows side):
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then shut WSL down from Windows and open it again:
+
+```bash
+wsl --shutdown
+```
+
+Run `homenet whoami-net`. The address should now be on your home LAN, and the warning should be gone.

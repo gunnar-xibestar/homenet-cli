@@ -42,8 +42,11 @@ from homenet.output import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Wording from homenet.core.checks.check_privileges.
-PRIVILEGE_HINT = "Re-run with sudo, for example `sudo homenet devices`."
+# Wording from homenet.core.checks.privilege_fix_hint for a resolved program path.
+PRIVILEGE_HINT = (
+    "To see MAC addresses and makers, run `sudo /opt/venv/bin/homenet devices`. "
+    "homenet doctor does not need sudo."
+)
 
 
 def _load_toml(text: str) -> dict:
@@ -102,6 +105,7 @@ def test_help(command, capsys):
     assert "Example:" in out and EXAMPLES[command] in out
     assert ("--json" in out) is (command in JSON_COMMANDS)
     assert "--show-cmd" in out
+    assert ("--gateway" in out) is (command == "explain")
     if command == "new-devices":
         for code in ("0 when nothing changed", "1 when a device is new", "and 2 on error"):
             assert code in out
@@ -150,6 +154,20 @@ def _patch_detect(monkeypatch, result: NetInfo | NetInfoError) -> None:
         return result
 
     monkeypatch.setattr(netinfo, "detect", detect)
+
+
+def test_whoami_net_prints_wsl_warning(capsys, monkeypatch):
+    info = NetInfo("eth0", "172.22.240.5", "172.22.240.1", "172.22.240.0/20", wsl_nat=True)
+    _patch_detect(monkeypatch, info)
+    assert main(["whoami-net"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_whoami(info) + "\n"
+    assert "WSL virtual network" in captured.out and "wsl --shutdown" in captured.out
+    assert main(["whoami-net", "--json"]) == 0
+    loaded = json.loads(capsys.readouterr().out)
+    assert loaded["wsl_nat"] is True
+    assert "networkingMode=mirrored" in loaded["warning"]
+    assert "[wsl2]" in loaded["warning"]
 
 
 def test_whoami_net_prints_core_netinfo(capsys, monkeypatch):
@@ -201,7 +219,7 @@ def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
             [CheckResult("privileges", False, "normal user", PRIVILEGE_HINT, "warning")],
             0,
             ["WARN  privileges", PRIVILEGE_HINT, "No errors. 1 warning."],
-            ["FAIL", "setcap"],
+            ["FAIL", "setcap", "sudo homenet doctor"],
         ),
         (
             [

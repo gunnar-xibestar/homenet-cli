@@ -6,8 +6,10 @@ and they do not spawn system commands.
 Input shapes for Net Core to match:
 
 * :func:`format_whoami` takes one :class:`homenet.core.netinfo.NetInfo`.
-  Fields it reads: ``interface``, ``ip``, ``gateway``, ``subnet``.
+  Fields it reads: ``interface``, ``ip``, ``gateway``, ``subnet``, ``wsl_nat``.
   ``NetInfo`` has no MAC address, so this view does not show one.
+  When ``wsl_nat`` is true, the plain view adds a warning that scans see the
+  WSL virtual network, not the home LAN.
 * :func:`format_devices` takes a sequence of :class:`homenet.core.parser.Device`
   (the host list for ``homenet devices``).
 * :func:`format_device` takes one :class:`homenet.core.parser.Device`
@@ -48,16 +50,23 @@ result (quotes, backslashes, and non-ASCII).
 ``homenet whoami-net --json``::
 
     {"gateway": str|null, "interface": str|null, "ip": str|null,
-     "prefix": int|null, "subnet": str|null}
+     "prefix": int|null, "subnet": str|null, "warning": str|null,
+     "wsl_nat": bool}
 
 ``ip`` is the address. ``prefix`` is the integer length the plain view shows
 after it (``address/prefix``). ``prefix`` is null when that line has no prefix.
+``wsl_nat`` is true when the active address is inside WSL 2's NAT range.
+``warning`` then explains that scans see the virtual network, not the home LAN,
+and how to switch WSL to mirrored networking. Otherwise ``warning`` is null.
 
 ``homenet doctor --json``::
 
     {"checks": [{"detail": str|null, "fix_hint": str|null, "name": str,
                  "ok": bool, "severity": "ok"|"warning"|"error"}, ...],
      "ok": bool}
+
+On WSL 2 NAT, ``checks`` also includes a warning named ``wsl``. That warning
+does not set ``ok`` to false.
 
 ``<device>``::
 
@@ -129,6 +138,7 @@ from homenet.core.parser import Device, Port
 from homenet.core.port_notes import GENERIC_NOTE, PortNote
 from homenet.core.router import AdminPage, RouterCheck
 from homenet.core.speed import SpeedResult
+from homenet.core.wsl import WSL_NAT_FIX, wsl_nat_detail
 
 _UNKNOWN = "unknown"
 _NOT_AVAILABLE = "not available"
@@ -198,6 +208,9 @@ def format_whoami(info: NetInfo) -> str:
     lines = ["This computer on your home network", "", _pairs(rows), "", *_WHOAMI_NOTES]
     if not info.ip:
         lines.extend(["", "This computer's own IP address was not available."])
+    if info.wsl_nat:
+        network = _clean(info.subnet) or _clean(info.ip)
+        lines.extend(["", f"Warning: {wsl_nat_detail(network)}", WSL_NAT_FIX])
     return "\n".join(lines)
 
 
@@ -307,12 +320,18 @@ def format_whoami_json(info: NetInfo) -> str:
     ``ip`` and ``prefix`` are the same address and length the plain view shows.
     """
     ip, prefix = _address_prefix(info)
+    warning = None
+    if info.wsl_nat:
+        network = _clean(info.subnet) or _clean(info.ip)
+        warning = _clean(f"{wsl_nat_detail(network)} {WSL_NAT_FIX}")
     payload = {
         "interface": _clean(info.interface),
         "ip": ip,
         "prefix": prefix,
         "gateway": _clean(info.gateway),
         "subnet": _clean(info.subnet),
+        "wsl_nat": bool(info.wsl_nat),
+        "warning": warning,
     }
     return _dumps(payload)
 

@@ -5,15 +5,19 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shlex
 import shutil
 import socket
 import struct
 import subprocess  # noqa: S404 - argument lists only
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from homenet.core.commands import Command, notify, run_command
+from homenet.core.netinfo import NetInfoError, parse_proc_route
+from homenet.core.wsl import WSL_NAT_FIX, wsl_nat_active, wsl_nat_detail
 
 CAP_NET_RAW = 13
 
@@ -102,10 +106,56 @@ def _has_cap_net_raw(status_text: str) -> bool:
     return bool(m and int(m.group(1), 16) & (1 << CAP_NET_RAW))
 
 
+def _named_homenet(path: str) -> bool:
+    return Path(path).name == "homenet"
+
+
+def _is_file(path: str) -> bool:
+    return Path(path).is_file()
+
+
+def resolve_homenet_program(
+    argv0: str | None = None,
+    which: Callable[[str], str | None] | None = None,
+    is_file: Callable[[str], bool] | None = None,
+) -> str | None:
+    """Absolute path of this homenet program, so sudo can find it after resetting PATH.
+
+    Prefers ``argv0`` (default ``sys.argv[0]``) when that file is named ``homenet``,
+    then :func:`shutil.which`. Returns None when neither is the homenet program.
+    """
+    which = shutil.which if which is None else which
+    is_file = _is_file if is_file is None else is_file
+    raw = sys.argv[0] if argv0 is None else argv0
+    found = which("homenet")
+    for candidate in (raw, found):
+        if not candidate or not _named_homenet(candidate):
+            continue
+        if is_file(candidate):
+            return str(Path(candidate).resolve())
+    return None
+
+
+def sudo_homenet(command: str, program: str | None) -> str:
+    """A sudo command that still finds homenet when sudo resets PATH."""
+    if program:
+        return f"sudo {shlex.quote(program)} {command}"
+    return f'sudo "$(command -v homenet)" {command}'
+
+
+def privilege_fix_hint(program: str | None) -> str:
+    """How to re-run a scan with sudo. Doctor itself does not need sudo."""
+    shown = sudo_homenet("devices", program)
+    return f"To see MAC addresses and makers, run `{shown}`. homenet doctor does not need sudo."
+
+
 def check_privileges(
     geteuid: Callable[[], int] | None = None,
     read_text: Callable[[str], str] | None = None,
     environ: dict[str, str] | None = None,
+    argv0: str | None = None,
+    which: Callable[[str], str | None] | None = None,
+    is_file: Callable[[str], bool] | None = None,
 ) -> CheckResult:
     """Check for root, sudo or CAP_NET_RAW (needed for ARP/SYN scans and MACs)."""
     env = os.environ if environ is None else environ
@@ -120,12 +170,13 @@ def check_privileges(
         caps = False
     if caps:
         return _ok("privileges", "CAP_NET_RAW is available")
+    program = resolve_homenet_program(argv0=argv0, which=which, is_file=is_file)
     return CheckResult(
         "privileges",
         False,
         "running as a normal user: scans work, but MAC addresses/vendors and SYN scans "
         "need extra privileges",
-        "Re-run with sudo, for example `sudo homenet devices`.",
+        privilege_fix_hint(program),
         "warning",
     )
 
@@ -172,6 +223,34 @@ def check_network(read_text: Callable[[str], str] | None = None) -> CheckResult:
             "error",
         )
     return _ok("network", f"default route via interface {iface} ({state})")
+
+
+def check_wsl(
+    read_text: Callable[[str], str] | None = None,
+    environ: dict[str, str] | None = None,
+) -> CheckResult | None:
+    """Warn when WSL 2 NAT hides the home LAN. None when that does not apply.
+
+    A warning does not fail doctor. Detection stays in :mod:`homenet.core.wsl`.
+    """
+    read_text = read_text or _read_text
+    try:
+        text = read_text("/proc/net/route")
+    except OSError:
+        return None
+    try:
+        _iface, _gateway, subnet = parse_proc_route(text)
+    except NetInfoError:
+        return None
+    if not wsl_nat_active(subnet, environ=environ, read_text=read_text):
+        return None
+    return CheckResult(
+        "wsl",
+        False,
+        wsl_nat_detail(subnet),
+        WSL_NAT_FIX,
+        "warning",
+    )
 
 
 def _gateway(read_text: Callable[[str], str] | None = None) -> str | None:
@@ -260,15 +339,29 @@ def run_all_checks(
     geteuid: Callable[[], int] | None = None,
     read_text: Callable[[str], str] | None = None,
     environ: dict[str, str] | None = None,
+    argv0: str | None = None,
+    is_file: Callable[[str], bool] | None = None,
 ) -> list[CheckResult]:
     """Run nmap, ip, privileges, network and ping checks, in that order.
 
+    A WSL 2 NAT warning is appended when it applies. It does not fail doctor.
     All I/O hooks are optional so tests can pass fakes.
     """
-    return [
+    results = [
         check_tool("nmap", which=which, run=run),
         check_tool("ip", which=which, run=run),
-        check_privileges(geteuid=geteuid, read_text=read_text, environ=environ),
+        check_privileges(
+            geteuid=geteuid,
+            read_text=read_text,
+            environ=environ,
+            argv0=argv0,
+            which=which,
+            is_file=is_file,
+        ),
         check_network(read_text=read_text),
         check_ping(which=which, run=run, read_text=read_text),
     ]
+    wsl = check_wsl(read_text=read_text, environ=environ)
+    if wsl is not None:
+        results.append(wsl)
+    return results

@@ -1,3 +1,5 @@
+import ipaddress
+import json
 import subprocess
 
 import pytest
@@ -27,6 +29,48 @@ def test_detect_with_ip(load_fixture):
     assert detect(run=fake_ip(load_fixture)) == NetInfo(
         "wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24"
     )
+
+
+@pytest.mark.parametrize(
+    ("local", "prefix", "env", "version", "flag"),
+    [
+        ("172.22.240.5", 20, {"WSL_DISTRO_NAME": "Ubuntu"}, None, True),
+        ("192.168.1.20", 24, {"WSL_DISTRO_NAME": "Ubuntu"}, None, False),
+        ("172.22.240.5", 20, {}, "Linux version 5.15.0-microsoft-standard", True),
+        ("172.22.240.5", 20, {}, "Linux version 6.12.94+", False),
+        ("172.31.255.254", 16, {"WSL_DISTRO_NAME": "Debian"}, None, True),
+        ("172.32.0.5", 24, {"WSL_DISTRO_NAME": "Debian"}, None, False),
+        ("10.0.0.8", 24, {"WSL_DISTRO_NAME": "Ubuntu"}, None, False),
+    ],
+)
+def test_detect_sets_wsl_nat(local, prefix, env, version, flag):
+    network = ipaddress.ip_network(f"{local}/{prefix}", strict=False)
+    gateway = str(next(network.hosts()))
+
+    def run(args):
+        if args[1] == "route":
+            body = [{"dst": "default", "gateway": gateway, "dev": "eth0", "metric": 0}]
+        elif args[1] == "addr":
+            body = [
+                {
+                    "ifname": "eth0",
+                    "addr_info": [{"family": "inet", "local": local, "prefixlen": prefix}],
+                }
+            ]
+        else:
+            raise AssertionError(args)
+        return json.dumps(body)
+
+    def read(path):
+        assert path == "/proc/version"
+        assert version is not None
+        return version
+
+    info = detect(run=run, read_file=read, environ=env)
+    assert info.wsl_nat is flag
+    assert info.ip == local
+    assert info.subnet == str(network)
+    assert info.interface == "eth0"
 
 
 def test_detect_falls_back_to_proc(load_fixture):
