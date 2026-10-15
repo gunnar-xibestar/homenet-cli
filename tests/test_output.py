@@ -435,15 +435,70 @@ def test_json_dumps_escapes_device_strings(device, wrapped, expected, snippets, 
         assert "pwn" not in loaded
 
 
-def test_whoami_json_uses_null_for_missing_fields():
-    text = format_whoami_json(NetInfo("eth0\x1b", None, "10.0.0.1", "10.0.0.0/24"))
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [
+        (
+            NetInfo("wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24"),
+            {
+                "gateway": "192.168.1.1",
+                "interface": "wlp2s0",
+                "ip": "192.168.1.100",
+                "prefix": 24,
+                "subnet": "192.168.1.0/24",
+            },
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", None, None),
+            {
+                "gateway": None,
+                "interface": "eth0",
+                "ip": "10.0.0.5",
+                "prefix": None,
+                "subnet": None,
+            },
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", "10.0.0.1", "not-a-network"),
+            {
+                "gateway": "10.0.0.1",
+                "interface": "eth0",
+                "ip": "10.0.0.5",
+                "prefix": None,
+                "subnet": "not-a-network",
+            },
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", "10.0.0.1", "fe80::/64"),
+            {
+                "gateway": "10.0.0.1",
+                "interface": "eth0",
+                "ip": "10.0.0.5",
+                "prefix": None,
+                "subnet": "fe80::/64",
+            },
+        ),
+        (
+            NetInfo("eth0\x1b", None, "10.0.0.1", "10.0.0.0/24"),
+            {
+                "gateway": "10.0.0.1",
+                "interface": "eth0?",
+                "ip": None,
+                "prefix": None,
+                "subnet": "10.0.0.0/24",
+            },
+        ),
+    ],
+    ids=["prefix", "no-subnet", "bad-subnet", "mixed-version", "no-ip"],
+)
+def test_whoami_json_matches_the_plain_address(info, expected):
+    text = format_whoami_json(info)
     assert "\x1b" not in text
-    assert json.loads(text) == {
-        "gateway": "10.0.0.1",
-        "interface": "eth0?",
-        "ip": None,
-        "subnet": "10.0.0.0/24",
-    }
+    assert json.loads(text) == expected
+    shown = "not available" if expected["ip"] is None else expected["ip"]
+    if expected["prefix"] is not None:
+        shown = f"{shown}/{expected['prefix']}"
+    assert f"IP address    {shown}" in format_whoami(info)
 
 
 def test_diff_json_shape_covers_every_section():
