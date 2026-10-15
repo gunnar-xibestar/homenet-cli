@@ -74,6 +74,7 @@ EXAMPLES = {
     "new-devices": "homenet new-devices",
     "speed": "homenet speed",
     "doctor": "homenet doctor",
+    "explain": "homenet explain devices",
 }
 JSON_COMMANDS = {
     "whoami-net",
@@ -85,6 +86,7 @@ JSON_COMMANDS = {
     "new-devices",
     "speed",
     "doctor",
+    "explain",
 }
 
 
@@ -99,6 +101,7 @@ def test_help(command, capsys):
         return
     assert "Example:" in out and EXAMPLES[command] in out
     assert ("--json" in out) is (command in JSON_COMMANDS)
+    assert "--show-cmd" in out
     if command == "new-devices":
         for code in ("0 when nothing changed", "1 when a device is new", "and 2 on error"):
             assert code in out

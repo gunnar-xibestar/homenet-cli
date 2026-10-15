@@ -102,6 +102,16 @@ still success. Argparse usage errors exit 2.
 ``--json`` errors are a JSON object on stderr::
 
     {"error": str, "fix_hint": str|null}
+
+``--show-cmd --json`` adds a top-level ``commands`` list to that object and to
+every successful JSON object. ``homenet explain --json`` is::
+
+    {"command": str,
+     "commands": [{"argv": [str, ...], "display": str, "purpose": str,
+                   "kind": "exec"|"http"}, ...]}
+
+``display`` and ``purpose`` have been passed through :func:`_clean`. ``argv``
+is the argument list the command would actually use.
 """
 
 from __future__ import annotations
@@ -150,6 +160,27 @@ def format_error_json(message: str, hint: str | None = None) -> str:
     """
     text, fix = _error_parts(message, hint)
     return _dumps({"error": text, "fix_hint": fix})
+
+
+def format_explain_json(command: str, commands: Sequence[dict]) -> str:
+    """JSON for ``homenet explain <command> --json``.
+
+    Shape: ``{"command": str, "commands": [<command>, ...]}``. Each command
+    object is the one :meth:`~homenet.core.commands.Command.to_dict` returns,
+    with ``display`` and ``purpose`` already cleaned by the caller.
+    """
+    return _dumps({"command": _clean(command) or "", "commands": list(commands)})
+
+
+def merge_commands(document: str, commands: Sequence[dict]) -> str:
+    """Add a top-level ``commands`` list to a JSON object.
+
+    Used when ``--show-cmd`` is combined with ``--json``. ``commands`` entries
+    use the same shape as :func:`format_explain_json`.
+    """
+    payload = json.loads(document)
+    payload["commands"] = list(commands)
+    return _dumps(payload)
 
 
 def _error_parts(message: str, hint: str | None) -> tuple[str, str | None]:
