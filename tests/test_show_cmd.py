@@ -122,7 +122,7 @@ def _patch_run(monkeypatch, command: str, cmd: Command) -> dict:
     if command == "baseline":
         monkeypatch.setattr(baseline, "save_baseline", lambda *_a, **_k: "baseline.json")
     if command == "new-devices":
-        monkeypatch.setattr(baseline, "load_baseline", lambda: [LAPTOP])
+        monkeypatch.setattr(baseline, "load_baseline", lambda path=None: [LAPTOP])
     return calls
 
 
