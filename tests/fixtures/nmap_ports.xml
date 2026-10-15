@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap -sT --top-ports 20 -oX - 192.168.1.0/30" start="1760518800" version="7.94" xmloutputversion="1.05">
+<host><status state="up" reason="syn-ack" reason_ttl="0"/>
+<address addr="192.168.1.1" addrtype="ipv4"/>
+<address addr="A4:2B:B0:11:22:33" addrtype="mac" vendor="TP-Link Technologies"/>
+<hostnames><hostname name="router.lan" type="PTR"/></hostnames>
+<ports><extraports state="closed" count="17"/>
+<port protocol="tcp" portid="53"><state state="open" reason="syn-ack"/><service name="domain" method="table" conf="3"/></port>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack"/><service name="http" method="table" conf="3"/></port>
+<port protocol="tcp" portid="443"><state state="filtered" reason="no-response"/></port>
+</ports>
+</host>
+<host><status state="down" reason="no-response" reason_ttl="0"/>
+<address addr="192.168.1.2" addrtype="ipv4"/>
+</host>
+<runstats><finished time="1760518803" elapsed="2.91" exit="success"/><hosts up="1" down="1" total="2"/></runstats>
+</nmaprun>
