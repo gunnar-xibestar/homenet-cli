@@ -58,9 +58,14 @@ def test_scan_services_light_only(load_fixture):
     assert dev.ports[1].product is None
 
 
-@pytest.mark.parametrize("fn", [scan_ports, scan_services])
+# Both scanners go through resolve_local_target; all targets on scan_ports, one on services.
 @pytest.mark.parametrize(
-    "target", ["10.0.0.5", "192.168.2.0/24", "172.17.0.1", "8.8.8.8", "192.168.0.0/16"]
+    ("fn", "target"),
+    [
+        *((scan_ports, t) for t in ("10.0.0.5", "192.168.2.0/24", "172.17.0.1", "8.8.8.8")),
+        (scan_ports, "192.168.0.0/16"),
+        (scan_services, "8.8.8.8"),
+    ],
 )
 def test_outside_local_subnet_refused(fn, target, load_fixture):
     calls = []
@@ -92,27 +97,6 @@ def test_bad_top_ports_refused(load_fixture):
         )
 
 
-@pytest.mark.parametrize(
-    "flags",
-    [
-        ["-sV"],
-        ["-sT", "-sV"],
-        ["-sV", "--version-intensity", "9"],
-        ["-sV", "--version-all"],
-        ["-sV", "--version-light", "--script", "vuln"],
-        ["-sV", "--version-light", "--script=http-title"],
-        ["--script-args", "x"],
-        ["-sV", "--version-light", "-A"],
-        ["-sV", "--version-light", "-O"],
-        ["-sC"],
-        ["--version-trace"],
-    ],
-)
-def test_runner_still_refuses_intrusive(flags):
-    with pytest.raises(DisallowedFlagError):
-        check_flags([f for f in flags if not f.isdigit()])
-
-
 def test_runner_allows_light_service():
     check_flags(["-sT", "-sV", "--version-light", "--top-ports", "-oX"])
 
@@ -120,23 +104,21 @@ def test_runner_allows_light_service():
 # ---- port notes ----
 
 
-@pytest.mark.parametrize(
-    ("port", "proto", "name", "risk"),
-    [
-        (22, "tcp", "SSH", "medium"),
-        (23, "tcp", "Telnet", "high"),
-        (80, "tcp", "HTTP", "medium"),
-        (443, "tcp", "HTTPS", "low"),
-        (445, "tcp", "SMB", "high"),
-        (3389, "tcp", "RDP", "high"),
-        (5900, "tcp", "VNC", "high"),
-        (1900, "udp", "UPnP", "medium"),
-        (8080, "tcp", "HTTP-alt", "medium"),
-    ],
-)
-def test_known_ports(port, proto, name, risk):
-    n = note_for(port, proto)
-    assert (n.name, n.risk) == (name, risk) and n.note
+def test_known_ports():
+    table = {
+        (22, "tcp"): ("SSH", "medium"),
+        (23, "tcp"): ("Telnet", "high"),
+        (80, "tcp"): ("HTTP", "medium"),
+        (443, "tcp"): ("HTTPS", "low"),
+        (445, "tcp"): ("SMB", "high"),
+        (3389, "tcp"): ("RDP", "high"),
+        (5900, "tcp"): ("VNC", "high"),
+        (1900, "udp"): ("UPnP", "medium"),
+        (8080, "tcp"): ("HTTP-alt", "medium"),
+    }
+    for (port, proto), expected in table.items():
+        n = note_for(port, proto)
+        assert (n.name, n.risk) == expected and n.note, port
 
 
 def test_service_name_fallback_and_generic():

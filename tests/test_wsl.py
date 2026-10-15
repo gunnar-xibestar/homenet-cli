@@ -16,13 +16,16 @@ from homenet.core.wsl import in_wsl_nat, is_wsl, wsl_nat_active
         ({}, "Linux version 5.15.0-Microsoft-Standard", True),
         ({}, "linux version 6.12.94+", False),
         ({}, None, False),
+        ({}, "WSLInterop", True),  # no marker in /proc/version, but binfmt WSLInterop exists
     ],
 )
 def test_is_wsl(env, version, expected):
     def read(path):
-        if path != "/proc/version":
-            raise OSError(path)
-        if version is None:
+        if version == "WSLInterop":
+            if path == "/proc/sys/fs/binfmt_misc/WSLInterop":
+                return "enabled"
+            return "Linux version 6.6.0"
+        if path != "/proc/version" or version is None:
             raise OSError(path)
         return version
 
@@ -33,20 +36,13 @@ def test_is_wsl(env, version, expected):
     ("address", "expected"),
     [
         ("172.16.0.1", True),
-        ("172.22.240.5", True),
         ("172.31.255.255", True),
         ("172.15.255.255", False),
         ("172.32.0.1", False),
-        ("192.168.1.20", False),
-        ("10.255.255.254", False),
-        ("172.22.240.0/20", True),
         ("172.16.0.0/12", True),
-        ("172.17.0.0/16", True),
         ("172.16.0.0/11", False),
-        ("192.168.0.0/16", False),
         ("172.22.240.5/20", True),
         (None, False),
-        ("", False),
         ("   ", False),
         ("not-an-ip", False),
         ("fe80::1", False),

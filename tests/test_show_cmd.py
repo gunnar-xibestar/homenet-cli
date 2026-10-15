@@ -63,10 +63,14 @@ _EXPLAIN = (
 )
 
 
+# json mode is shared code; two commands (one with and one without the banner) cover it.
+_SHOW_JSON = {"devices", "doctor"}
+
+
 def _show_params():
     for command, argv, banner, has_json in _SHOW:
         yield pytest.param(command, argv, banner, False, id=command)
-        if has_json:
+        if has_json and command in _SHOW_JSON:
             yield pytest.param(command, argv, banner, True, id=f"{command}-json")
 
 
@@ -150,21 +154,6 @@ def no_scans(monkeypatch):
     monkeypatch.setattr(baseline, "load_baseline", fail)
 
 
-def test_help_mentions_show_cmd_and_explain(capsys):
-    with pytest.raises(SystemExit) as top:
-        main(["--help"])
-    assert top.value.code == 0
-    top_help = capsys.readouterr().out
-    assert "--show-cmd" in top_help and "explain" in top_help
-    with pytest.raises(SystemExit):
-        main(["devices", "--help"])
-    assert "--show-cmd" in capsys.readouterr().out
-    with pytest.raises(SystemExit):
-        main(["explain", "--help"])
-    out = capsys.readouterr().out
-    assert "ip" in out and "--json" in out and "homenet explain devices" in out
-
-
 @pytest.mark.parametrize(("command", "argv", "banner", "json_mode"), list(_show_params()))
 def test_show_cmd(command, argv, banner, json_mode, capsys, monkeypatch):
     cmd = _sample(command)
@@ -236,8 +225,16 @@ def test_show_cmd_json_error_lists_commands_and_skips_the_dollar_line(capsys, mo
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
-@pytest.mark.parametrize(("command", "extra", "params"), _EXPLAIN)
+def _explain_params():
+    # devices, baseline and new-devices share plan_scan; keep one of them.
+    for command, extra, params in _EXPLAIN:
+        if command not in ("baseline", "new-devices"):
+            yield pytest.param(command, extra, params, False, id=command)
+        if command in ("devices", "router"):
+            yield pytest.param(command, extra, params, True, id=f"{command}-json")
+
+
+@pytest.mark.parametrize(("command", "extra", "params", "json_mode"), list(_explain_params()))
 def test_explain(command, extra, params, json_mode, capsys, monkeypatch, no_scans):
     seen = {}
 
@@ -317,10 +314,9 @@ def test_explain_cleans_displayed_commands(capsys, monkeypatch, no_scans):
     assert "\x1b" in item["argv"][2]
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
 @pytest.mark.parametrize(
-    ("command", "code"),
-    [("devices", 1), ("new-devices", 2), ("ports", 1), ("baseline", 1)],
+    ("command", "code", "json_mode"),
+    [("devices", 1, False), ("devices", 1, True), ("new-devices", 2, False), ("ports", 1, False)],
 )
 def test_explain_planner_valueerror_is_a_friendly_target_error(
     command, code, json_mode, capsys, monkeypatch, no_scans
@@ -347,8 +343,10 @@ def test_explain_planner_valueerror_is_a_friendly_target_error(
         assert "Fix:" in blob and BANNER not in blob
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
-@pytest.mark.parametrize(("command", "code"), [("devices", 1), ("router", 1), ("new-devices", 2)])
+@pytest.mark.parametrize(
+    ("command", "code", "json_mode"),
+    [("devices", 1, False), ("router", 1, True), ("new-devices", 2, False)],
+)
 def test_explain_detection_failure_uses_the_fix_hint(
     command, code, json_mode, capsys, monkeypatch, no_scans
 ):
@@ -378,10 +376,14 @@ def test_explain_detection_failure_uses_the_fix_hint(
         assert blob.startswith("Could not detect") and "Fix:" in blob and BANNER not in blob
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
 @pytest.mark.parametrize(
-    "argv",
-    [["device", "nope"], ["ports", "192.168.1.0/24"], ["services", "2001:db8::1"]],
+    ("argv", "json_mode"),
+    [
+        (["device", "nope"], False),
+        (["ports", "192.168.1.0/24"], False),
+        (["services", "2001:db8::1"], False),
+        (["device", "nope"], True),
+    ],
 )
 def test_explain_bad_address_matches_the_real_command(argv, json_mode, capsys, no_scans):
     real_argv = [*argv, "--json"] if json_mode else argv

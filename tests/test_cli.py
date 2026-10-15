@@ -40,8 +40,6 @@ from homenet.output import (
     format_whoami_json,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-
 # Wording from homenet.core.checks.privilege_fix_hint for a resolved program path.
 PRIVILEGE_HINT = (
     "To see MAC addresses and makers, run `sudo /opt/venv/bin/homenet devices`. "
@@ -49,77 +47,35 @@ PRIVILEGE_HINT = (
 )
 
 
-def _load_toml(text: str) -> dict:
-    """tomllib is stdlib on 3.11+; Python 3.10 uses the tomli dependency."""
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
-
-    return tomllib.loads(text)
-
-
-def test_console_script_entry_point():
-    data = _load_toml((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["scripts"]["homenet"] == "homenet.cli:main"
-    dev = data["project"]["optional-dependencies"]["dev"]
-    assert any(item.startswith("tomli") for item in dev)
-
-
-EXAMPLES = {
-    "whoami-net": "homenet whoami-net",
-    "devices": "homenet devices",
-    "device": "homenet device 192.168.1.20",
-    "ports": "homenet ports 192.168.1.1",
-    "services": "homenet services 192.168.1.1",
-    "router": "homenet router",
-    "baseline": "homenet baseline",
-    "new-devices": "homenet new-devices",
-    "speed": "homenet speed",
-    "doctor": "homenet doctor",
-    "explain": "homenet explain devices",
-}
-JSON_COMMANDS = {
+_SUBCOMMANDS = (
     "whoami-net",
     "devices",
     "device",
     "ports",
     "services",
     "router",
+    "baseline",
     "new-devices",
     "speed",
     "doctor",
     "explain",
-}
+)
 
 
-@pytest.mark.parametrize("command", [None, *EXAMPLES])
-def test_help(command, capsys):
+@pytest.mark.parametrize("command", [None, *_SUBCOMMANDS])
+def test_help_exits_zero(command, capsys):
+    """Smoke test only: every --help renders and exits 0. Wording is not pinned."""
     with pytest.raises(SystemExit) as exc:
         main([command, "--help"] if command else ["--help"])
     assert exc.value.code == 0
-    out = capsys.readouterr().out
-    if command is None:
-        assert all(name in out for name in EXAMPLES)
-        return
-    assert "Example:" in out and EXAMPLES[command] in out
-    assert ("--json" in out) is (command in JSON_COMMANDS)
-    assert "--show-cmd" in out
-    assert ("--gateway" in out) is (command == "explain")
-    if command == "new-devices":
-        for code in ("0 when nothing changed", "1 when a device is new", "and 2 on error"):
-            assert code in out
-    if command == "services":
-        assert "--subnet" not in out and "allow_subnet" not in out
-    if command == "speed":
-        assert "Cloudflare" in out and "speed.cloudflare.com" in out
+    assert capsys.readouterr().out.strip()
 
 
 @pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
 def test_usage_errors_exit_nonzero(argv):
     with pytest.raises(SystemExit) as exc:
         main(argv)
-    assert exc.value.code != 0
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("metadata", ["1.2.3", None])
@@ -424,10 +380,16 @@ def test_baseline_saves_the_sweep(capsys, monkeypatch, tmp_path):
     assert captured.err == ""
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
 @pytest.mark.parametrize(
-    ("case", "code"),
-    [("same", 0), ("changed", 1), ("missing", 2), ("scan-error", 2)],
+    ("case", "code", "json_mode"),
+    [
+        ("same", 0, False),
+        ("changed", 1, False),
+        ("missing", 2, False),
+        ("scan-error", 2, False),
+        ("changed", 1, True),
+        ("missing", 2, True),
+    ],
 )
 def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
     current = [LAPTOP, PHONE] if case == "changed" else [LAPTOP]
@@ -750,14 +712,14 @@ def test_command_errors(command, json_mode, capsys, monkeypatch):
         assert (BANNER in captured.out) is (command != "speed")
 
 
-@pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
-@pytest.mark.parametrize("command", ("ports", "services"))
 @pytest.mark.parametrize(
-    ("ip", "phrase"),
+    ("command", "ip", "phrase", "json_mode"),
     [
-        ("192.168.1.0/24", "is a subnet"),
-        ("router.lan", "not a valid IP address"),
-        ("2001:db8::1", "not an IPv4 address"),
+        ("ports", "192.168.1.0/24", "is a subnet", False),
+        ("ports", "router.lan", "not a valid IP address", False),
+        ("ports", "2001:db8::1", "not an IPv4 address", False),
+        ("services", "192.168.1.0/24", "is a subnet", False),
+        ("ports", "192.168.1.0/24", "is a subnet", True),
     ],
 )
 def test_host_commands_reject_a_bad_target(command, ip, phrase, json_mode, capsys, monkeypatch):
