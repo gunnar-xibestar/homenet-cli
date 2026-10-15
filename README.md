@@ -71,7 +71,7 @@ If a tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo a
 
 Scans work as a normal user. No command runs a SYN scan. `services` uses `-sT -sV --version-light` and works without root. `ports` is a TCP connect scan (`-sT`) and works without root too. Sudo mainly adds MAC addresses and vendors to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
 
-When doctor warns about privileges, re-run with sudo, for example `sudo homenet devices`. The advanced alternative is `sudo setcap cap_net_raw+eip` on the nmap path from `command -v nmap`. That lets every user on this computer send raw network packets through nmap. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1.
+When doctor warns about privileges, re-run with sudo, for example `sudo homenet devices`. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1.
 
 ## Quick start
 
