@@ -453,6 +453,7 @@ def format_speed(result: SpeedResult) -> str:
         ("Download", f"{result.download_mbps:.2f} Mb/s"),
         ("Sample", f"{result.bytes_read} bytes"),
         ("Time", f"{result.seconds:.3f} seconds"),
+        ("From", "Cloudflare (speed.cloudflare.com)"),
     )
     return "\n".join(
         [
@@ -460,7 +461,8 @@ def format_speed(result: SpeedResult) -> str:
             "",
             _pairs(rows),
             "",
-            "This is a short download from the internet, not a full speed test.",
+            "This is a short download from Cloudflare (speed.cloudflare.com), "
+            "not a full speed test.",
             "Wi-Fi and other devices in your home can make this lower than your plan.",
             "Mb/s means megabits per second, the unit internet plans use.",
         ]

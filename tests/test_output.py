@@ -662,6 +662,8 @@ def test_format_speed_uses_megabits():
     assert "Sample    1000000 bytes" in text
     assert "Time      1.000 seconds" in text
     assert "not a full speed test" in text
+    assert "Cloudflare" in text
+    assert "speed.cloudflare.com" in text
     raw = format_speed_json(SpeedResult(8.0, 1000, 0.5, "https://example.test/\x1b"))
     assert "\x1b" not in raw
     assert json.loads(raw) == {

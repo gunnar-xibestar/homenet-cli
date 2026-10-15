@@ -42,15 +42,14 @@ def test_port_modes_use_top_ports(mode, flag):
     assert args[-1] == "192.168.1.5/32"
 
 
-@pytest.mark.parametrize("n", [0, 1001, True, "10"])
-def test_bad_top_ports(n):
+@pytest.mark.parametrize(
+    ("mode", "top"),
+    [("syn", 0), ("syn", 1001), ("syn", True), ("syn", "10"), ("aggressive", 100)],
+    ids=["top-0", "top-over-cap", "top-bool", "top-str", "unknown-mode"],
+)
+def test_build_args_rejects_bad_mode_or_top_ports(mode, top):
     with pytest.raises(DisallowedFlagError):
-        build_args("192.168.1.5", "syn", n, local_network=LOCAL)
-
-
-def test_unknown_mode():
-    with pytest.raises(DisallowedFlagError):
-        build_args("192.168.1.0/24", "aggressive", local_network=LOCAL)
+        build_args("192.168.1.5", mode, top, local_network=LOCAL)
 
 
 @pytest.mark.parametrize(
@@ -63,7 +62,17 @@ def test_blocked_flags(flag):
 
 
 @pytest.mark.parametrize(
-    "t", ["", "  ", "-sV", "192.168.1.1; rm -rf /", "foo", "300.1.1.1", "fe80::1"]
+    "t",
+    [
+        "",
+        "  ",
+        "-sV",
+        "192.168.1.1; rm -rf /",
+        "192.168.1.1 192.168.1.2",
+        "foo",
+        "300.1.1.1",
+        "fe80::1",
+    ],
 )
 def test_invalid_targets(t):
     with pytest.raises(InvalidTargetError):
@@ -76,15 +85,11 @@ def test_public_or_huge_refused_even_with_force(t):
         validate_target(t, force=True)
 
 
-def test_outside_local_subnet_needs_force():
+@pytest.mark.parametrize("local", [LOCAL, None], ids=["other-subnet", "no-local-network"])
+def test_outside_local_subnet_needs_force(local):
     with pytest.raises(TargetNotAllowedError, match="outside your local subnet"):
-        validate_target("10.0.5.0/24", LOCAL)
-    assert str(validate_target("10.0.5.0/24", LOCAL, force=True)) == "10.0.5.0/24"
-
-
-def test_no_local_networks_refused():
-    with pytest.raises(TargetNotAllowedError):
-        validate_target("192.168.1.0/24")
+        validate_target("10.0.5.0/24", local)
+    assert str(validate_target("10.0.5.0/24", local, force=True)) == "10.0.5.0/24"
 
 
 def _fake_run(monkeypatch, result=None, exc=None):
@@ -111,17 +116,35 @@ def test_run_scan_success(monkeypatch, load_fixture):
     assert kw["shell"] is False and kw["timeout"] == 5
 
 
-def test_run_scan_missing_nmap(monkeypatch):
+def test_run_scan_missing_nmap_is_silent(monkeypatch, capsys):
     monkeypatch.setattr(runner.shutil, "which", lambda name: None)
     with pytest.raises(NmapNotFoundError) as ei:
         run_scan("192.168.1.0/24", local_network=LOCAL)
     assert "apt install nmap" in ei.value.hint
+    assert capsys.readouterr() == ("", "")  # core never prints
 
 
-def test_run_scan_timeout(monkeypatch):
-    _fake_run(monkeypatch, exc=subprocess.TimeoutExpired("nmap", 1))
-    with pytest.raises(NmapTimeoutError):
+@pytest.mark.parametrize(
+    ("result", "exc", "error"),
+    [
+        (None, subprocess.TimeoutExpired("nmap", 1), NmapTimeoutError),
+        (SimpleNamespace(returncode=2, stdout="", stderr="boom"), None, NmapFailedError),
+        # Root is detected up front, never by matching nmap's stderr text.
+        (
+            SimpleNamespace(returncode=1, stdout="", stderr="requires root privileges"),
+            None,
+            NmapFailedError,
+        ),
+    ],
+    ids=["timeout", "nonzero-exit", "root-text-not-matched"],
+)
+def test_run_scan_failures(monkeypatch, result, exc, error):
+    _fake_run(monkeypatch, result, exc)
+    with pytest.raises(error) as ei:
         run_scan("192.168.1.0/24", local_network=LOCAL, timeout=1)
+    if result is not None:
+        assert ei.value.returncode == result.returncode
+        assert ei.value.stderr == result.stderr
 
 
 def test_syn_needs_root_detected_up_front(monkeypatch):
@@ -132,25 +155,15 @@ def test_syn_needs_root_detected_up_front(monkeypatch):
     assert calls == []  # nmap never started
 
 
-def test_syn_as_root(monkeypatch):
+@pytest.mark.parametrize(
+    ("privs", "privileged_flag"),
+    [(ROOT, False), ({"geteuid": lambda: 1000, "read_text": lambda p: "CapEff:\t2000\n"}, True)],
+    ids=["root", "cap-net-raw"],
+)
+def test_syn_with_privileges(monkeypatch, privs, privileged_flag):
     calls = _fake_run(monkeypatch, SimpleNamespace(returncode=0, stdout="<x/>", stderr=""))
-    run_scan("192.168.1.0/24", "syn", local_network=LOCAL, **ROOT)
-    assert "--privileged" not in calls[0][0]
-
-
-def test_syn_with_cap_net_raw_adds_privileged(monkeypatch):
-    calls = _fake_run(monkeypatch, SimpleNamespace(returncode=0, stdout="<x/>", stderr=""))
-    caps = {"geteuid": lambda: 1000, "read_text": lambda p: "CapEff:\t0000000000002000\n"}
-    run_scan("192.168.1.0/24", "syn", local_network=LOCAL, **caps)
-    assert "--privileged" in calls[0][0]
-
-
-def test_root_error_text_not_matched(monkeypatch):
-    _fake_run(
-        monkeypatch, SimpleNamespace(returncode=1, stdout="", stderr="requires root privileges")
-    )
-    with pytest.raises(NmapFailedError):
-        run_scan("192.168.1.0/24", local_network=LOCAL)
+    run_scan("192.168.1.0/24", "syn", local_network=LOCAL, **privs)
+    assert ("--privileged" in calls[0][0]) is privileged_flag
 
 
 def test_default_route_network_ignores_bridges(load_json_fixture):
@@ -179,22 +192,8 @@ def test_default_route_network_malformed(routes, addrs):
     assert default_route_network(routes, addrs) is None
 
 
-def test_run_scan_failure(monkeypatch):
-    _fake_run(monkeypatch, SimpleNamespace(returncode=2, stdout="", stderr="boom"))
-    with pytest.raises(NmapFailedError) as ei:
-        run_scan("192.168.1.0/24", local_network=LOCAL)
-    assert ei.value.returncode == 2 and ei.value.stderr == "boom"
-
-
 def test_validation_happens_before_running(monkeypatch):
     calls = _fake_run(monkeypatch, None)
     with pytest.raises(TargetNotAllowedError):
         run_scan("8.8.8.8", local_network=LOCAL)
     assert calls == []
-
-
-def test_runner_never_prints(monkeypatch, capsys):
-    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
-    with pytest.raises(NmapNotFoundError):
-        run_scan("192.168.1.0/24", local_network=LOCAL)
-    assert capsys.readouterr() == ("", "")

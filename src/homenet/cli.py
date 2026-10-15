@@ -193,7 +193,7 @@ _COMMANDS: tuple[_Command, ...] = (
         "speed",
         "Check how fast your internet connection is",
         "Measure how fast your connection to the internet is, in plain numbers, "
-        "using a short download.",
+        "using a short download from Cloudflare (speed.cloudflare.com).",
         "homenet speed",
         json=True,
     ),
