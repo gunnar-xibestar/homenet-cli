@@ -22,10 +22,16 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from homenet.core._text import _clean
+from homenet.core._text import DEFAULT_MAX_LEN, clean_text
 from homenet.core.devices import detect_local_network
 from homenet.core.netinfo import NetInfoError, _run_ip, parse_default_route
 from homenet.core.runner import InvalidTargetError, TargetNotAllowedError
+
+
+def _clean(value: object) -> str | None:
+    """Shared sanitiser, capped for core data (titles, headers, banners)."""
+    return clean_text(value, DEFAULT_MAX_LEN)
+
 
 ADMIN_URLS = ((80, "http"), (443, "https"), (8080, "http"))
 DEFAULT_TIMEOUT = 3.0  # per request
@@ -115,7 +121,8 @@ def extract_title(body: str) -> str | None:
     m = _TITLE.search(body or "")
     if not m:
         return None
-    return _clean(html.unescape(m.group(1)))
+    # HTML whitespace is insignificant: collapse it before sanitising.
+    return _clean(" ".join(html.unescape(m.group(1)).split()))
 
 
 def detect_gateway(ip_runner: Callable[[Sequence[str]], str] | None = None) -> str | None:

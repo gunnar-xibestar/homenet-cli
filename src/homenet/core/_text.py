@@ -1,26 +1,20 @@
-"""Text sanitising for untrusted network strings (titles, headers, banners)."""
+"""Shared sanitiser for untrusted network strings (hostnames, vendors, titles, banners)."""
 
 from __future__ import annotations
-
-import unicodedata
 
 DEFAULT_MAX_LEN = 200
 
 
-def _clean(text: object, max_len: int = DEFAULT_MAX_LEN) -> str | None:
-    """Drop control/format chars (incl. ESC, C1, bidi overrides), collapse whitespace.
+def clean_text(value: object, max_len: int | None = None) -> str | None:
+    """Replace every non-printable character with ``?`` and trim surrounding space.
 
-    Returns None for empty results. Output is capped at ``max_len`` characters.
+    Covers ESC/CSI/OSC sequences, C0/C1 controls, newlines and tabs, bidi
+    overrides and other format characters, so untrusted text cannot change the
+    terminal. Returns None for empty results; ``max_len`` optionally caps the length.
     """
-    if text is None:
+    if value is None:
         return None
-    out = []
-    for ch in str(text):
-        if ch in "\t\n\r\f\v":
-            out.append(" ")
-        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
-            continue
-        else:
-            out.append(ch)
-    cleaned = " ".join("".join(out).split())[:max_len]
-    return cleaned or None
+    visible = "".join(ch if ch.isprintable() else "?" for ch in str(value)).strip()
+    if max_len is not None:
+        visible = visible[:max_len].rstrip()
+    return visible or None
