@@ -1,0 +1,10 @@
+{
+  "devices": [
+    {"hostname": "router.lan", "ip": "192.168.1.1", "mac": "A4:2B:B0:11:22:33", "ports": [], "vendor": "TP-Link Technologies"},
+    {"hostname": "pihole.lan", "ip": "192.168.1.20", "mac": "B8:27:EB:AA:BB:CC", "ports": [], "vendor": "Raspberry Pi Foundation"},
+    {"hostname": null, "ip": "192.168.1.50", "mac": "00:11:22:33:44:55", "ports": [{"number": 80, "protocol": "tcp", "service": "http", "state": "open"}], "vendor": "Old Printer Co"},
+    {"hostname": "gunnar-laptop", "ip": "192.168.1.100", "mac": null, "ports": [], "vendor": null}
+  ],
+  "saved_at": "2026-10-01T09:00:00+00:00",
+  "schema_version": 1
+}
