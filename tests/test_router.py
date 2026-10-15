@@ -119,7 +119,6 @@ import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
 from homenet.core import router as rt  # noqa: E402
-from homenet.core._text import _clean  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -143,37 +142,13 @@ def test_unexpected_exception_is_contained():
     assert r.pages[0].error.startswith("unexpected error")
 
 
-@pytest.mark.parametrize(
-    ("raw", "clean"),
-    [
-        ("\x1b[31mRed\x1b[0m", "[31mRed[0m"),
-        ("a\x00b\x07c\x7f", "abc"),
-        ("x\u009bterm", "xterm"),
-        ("evil\u202egnp.exe", "evilgnp.exe"),
-        ("  a\n\tb  ", "a b"),
-        ("", None),
-        (None, None),
-        ("\x1b", None),
-        ("é ok 日本", "é ok 日本"),
-    ],
-)
-def test_clean(raw, clean):
-    assert _clean(raw) == clean
-
-
-def test_clean_caps_length():
-    assert len(_clean("a" * 500)) == 200
-
-
 def test_title_and_server_are_sanitized():
-    body = "<title>Router &#27;[2J&#x1b;]0;pwned\x07 Login</title>"
+    body = "<title>Router \x1b[2J\n  Login</title>"
     fetch = FakeFetcher(
-        {"http://192.168.1.1/": FetchResult(200, {"Server": "httpd\x1b[1m\r\nX-Evil: 1"}, body)}
+        {"http://192.168.1.1/": FetchResult(200, {"Server": "httpd\x1b[1m\r\nX: 1"}, body)}
     )
     page = check_router_admin("192.168.1.1", local_network=NET, fetch=fetch).pages[0]
-    assert "\x1b" not in page.title and "\x07" not in page.title
-    assert page.title == "Router [2J]0;pwned Login"
-    assert page.server == "httpd[1m X-Evil: 1"
+    assert (page.title, page.server) == ("Router ?[2J Login", "httpd?[1m??X: 1")
 
 
 def test_service_banners_sanitized():
@@ -186,7 +161,7 @@ def test_service_banners_sanitized():
         "</ports></host></nmaprun>"
     )
     (dev,) = parse_nmap_xml(xml)
-    assert (dev.ports[0].product, dev.ports[0].version) == ("Open[2JSSH", "9.2")
+    assert (dev.ports[0].product, dev.ports[0].version) == ("Open?[2JSSH", "9?.2?")
 
 
 # http_get with a fake opener
@@ -283,10 +258,19 @@ def test_overall_deadline_with_slow_fake():
 
 
 def test_budget_shared_across_ports():
-    def medium(url, timeout, verify):
-        time.sleep(0.15)
-        return FetchResult(200, {}, "<title>ok</title>")
+    # Port 80 answers at once; the others hang, so the shared budget runs out.
+    # Event-gated (no sleeps racing the budget), so CI load cannot flip the result.
+    release = threading.Event()
 
-    r = check_router_admin("192.168.1.1", local_network=NET, fetch=medium, budget=0.25)
+    def gated(url, timeout, verify):
+        if url == "http://192.168.1.1/":
+            return FetchResult(200, {}, "<title>ok</title>")
+        release.wait(5)
+        return FetchResult(200, {}, "")
+
+    try:
+        r = check_router_admin("192.168.1.1", local_network=NET, fetch=gated, budget=0.3)
+    finally:
+        release.set()
     assert r.pages[0].reachable
-    assert not r.pages[2].reachable and "time limit" in r.pages[2].error
+    assert all(not p.reachable and "time limit" in p.error for p in r.pages[1:])

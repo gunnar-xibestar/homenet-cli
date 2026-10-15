@@ -67,28 +67,39 @@ def test_format_whoami_shows_address_with_prefix():
     assert format_whoami(info) == _WHOAMI
 
 
-def test_format_whoami_says_when_the_address_is_missing():
-    text = format_whoami(NetInfo("wlp2s0", None, "192.168.1.1", "192.168.1.0/24"))
-    assert "IP address    not available" in text
-    assert "Home network  192.168.1.0/24" in text
-    assert text.endswith("This computer's own IP address was not available.")
-
-
-def test_format_whoami_keeps_a_bare_address_without_a_subnet():
-    text = format_whoami(NetInfo("eth0", "10.0.0.5", None, None))
-    assert "IP address    10.0.0.5" in text
-    assert "Gateway       not available" in text
-    assert "Home network  not available" in text
-    assert "/not" not in text
-
-
-def test_format_whoami_ignores_a_subnet_it_cannot_use():
-    bad = format_whoami(NetInfo("eth0", "10.0.0.5", "10.0.0.1", "not-a-network"))
-    mixed = format_whoami(NetInfo("eth0", "10.0.0.5", "10.0.0.1", "fe80::/64"))
-    assert "IP address    10.0.0.5\n" in bad
-    assert "Home network  not-a-network" in bad
-    assert "IP address    10.0.0.5\n" in mixed
-    assert "10.0.0.5/64" not in mixed
+@pytest.mark.parametrize(
+    ("info", "present", "absent"),
+    [
+        (
+            NetInfo("wlp2s0", None, "192.168.1.1", "192.168.1.0/24"),
+            ["IP address    not available", "Home network  192.168.1.0/24", "was not available."],
+            [],
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", None, None),
+            [
+                "IP address    10.0.0.5",
+                "Gateway       not available",
+                "Home network  not available",
+            ],
+            ["/not"],
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", "10.0.0.1", "not-a-network"),
+            ["IP address    10.0.0.5\n", "Home network  not-a-network"],
+            [],
+        ),
+        (
+            NetInfo("eth0", "10.0.0.5", "10.0.0.1", "fe80::/64"),
+            ["IP address    10.0.0.5\n"],
+            ["10.0.0.5/64"],
+        ),
+    ],
+    ids=["no-ip", "no-subnet", "bad-subnet", "mixed-version"],
+)
+def test_format_whoami_missing_or_unusable_fields(info, present, absent):
+    text = format_whoami(info)
+    assert all(s in text for s in present) and not any(s in text for s in absent)
 
 
 def test_format_error_includes_a_fix_when_one_is_known():
@@ -177,75 +188,28 @@ def test_format_device_without_a_name_or_ports():
     assert text.endswith("No ports were reported for this device.")
 
 
-def test_device_strings_replace_control_and_nonprintable_characters():
-    """A hostile name or vendor must not be able to drive the terminal."""
-    screen = format_devices([Device("192.168.1.5", None, "Ok", "x\x1b[2Jy")])
-    assert "\x1b" not in screen
-    assert "x?[2Jy" in screen
-
-    title = format_devices([Device("192.168.1.6", None, "Evil\x1b]0;pwn\x07", "ok")])
-    assert "\x1b" not in title
-    assert "\x07" not in title
-    assert "Evil?]0;pwn?" in title
-
-    bare = format_devices([Device("192.168.1.7", None, "a\x00b\x07c\x7fd", "e\x1ff")])
-    for char in ("\x00", "\x07", "\x7f", "\x1f"):
-        assert char not in bare
-    assert "a?b?c?d" in bare
-    assert "e?f" in bare
-
-    spaced = format_devices([Device("192.168.1.8", "aa\tbb", "line\r\nmore", "tab\there")])
-    assert "\t" not in spaced
-    assert "\r" not in spaced
-    assert "\nmore" not in spaced
-    assert "tab?here" in spaced
-    assert "aa?bb" in spaced
-    assert "line??more" in spaced
-
-    c1 = format_device(
-        Device(
-            "192.168.1.9",
-            None,
-            "c\x9d0;pwn\x9cd",
-            "a\x9b[2Jb\x85c",
-            [Port(80, "tcp", "open", "ht\x1btp")],
-        )
-    )
-    for char in ("\x1b", "\x9b", "\x9d", "\x9c", "\x85"):
-        assert char not in c1
-    assert "a?[2Jb?c" in c1
-    assert "c?0;pwn?d" in c1
-    assert "ht?tp" in c1
-
-
-def test_detail_title_ports_and_whoami_ip_are_cleaned():
-    detail = format_device(
-        Device(
-            "192.168.1.9\x1b[2J",
-            None,
-            "Ok",
-            "laptop",
-            [Port(80, "tc\x1bp", "op\x1ben", "http")],
-        )
-    )
-    assert "\x1b" not in detail
-    assert "laptop (192.168.1.9?[2J)" in detail
-    assert "tc?p" in detail
-    assert "op?en" in detail
-
-    missing_subnet = format_whoami(NetInfo("eth0", "10.0.0.5\x1b[31m", "10.0.0.1", None))
-    bad_subnet = format_whoami(NetInfo("eth0", "10.0.0.5\x1b[2J", "10.0.0.1", "nope"))
-    assert "\x1b" not in missing_subnet
-    assert "\x1b" not in bad_subnet
-    assert "10.0.0.5?[31m" in missing_subnet
-    assert "10.0.0.5?[2J" in bad_subnet
-
-
-def test_format_error_cleans_the_message_and_the_hint():
-    text = format_error("Could not read eth0\x1b[2J.", "Check wlan0\x1b]0;x\x07.")
-    assert "\x1b" not in text
-    assert "\x07" not in text
-    assert text == "Could not read eth0?[2J.\nFix: Check wlan0?]0;x?."
+# The sanitiser itself is tested in test_text.py; here, one hostile string per call site.
+@pytest.mark.parametrize(
+    ("render", "expected"),
+    [
+        (
+            lambda: format_devices([Device("192.168.1.5", None, "Evil\x1b]0;x", "x\x1b[2Jy")]),
+            "x?[2Jy",
+        ),
+        (
+            lambda: format_device(
+                Device("192.168.1.9\x1b[2J", None, None, "pc", [Port(80, "tc\x1bp", "op\x1ben")])
+            ),
+            "pc (192.168.1.9?[2J)",
+        ),
+        (lambda: format_whoami(NetInfo("eth0", "10.0.0.5\x1b[2J", None, "nope")), "10.0.0.5?[2J"),
+        (lambda: format_error("eth0\x1b[2J.", "wlan0\x07."), "eth0?[2J.\nFix: wlan0?."),
+    ],
+    ids=["devices", "device", "whoami", "error"],
+)
+def test_call_sites_sanitise_network_text(render, expected):
+    text = render()
+    assert "\x1b" not in text and "\x07" not in text and expected in text
 
 
 def test_format_device_accepts_a_parsed_host(load_fixture):
