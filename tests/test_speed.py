@@ -144,15 +144,22 @@ def test_deadline_stops_and_bodies_are_re_requested():
 def test_hung_connection_hits_the_real_deadline():
     release = threading.Event()
 
-    def hung(url, timeout):
+    def stalls_mid_body(url, timeout):
+        yield b"x" * 1000
         release.wait(5)
-        yield b""
+        yield b"y"
 
     start = time.monotonic()
-    with pytest.raises(SpeedError, match="Could not measure"):
-        measure_download(fetch=hung, duration=0.2, warmup=0, timeout=0.2, read_text=lambda p: "")
+    r = measure_download(
+        fetch=stalls_mid_body,
+        connections=1,
+        duration=0.2,
+        warmup=0,
+        timeout=0.2,
+        read_text=lambda p: "",
+    )
     release.set()
-    assert time.monotonic() - start < 2
+    assert time.monotonic() - start < 2 and r.total_bytes == 1000
 
 
 def test_one_failing_connection_does_not_stop_the_others():
@@ -180,16 +187,25 @@ def test_download_https_streams_chunks():
     assert opener.req.get_header("User-agent") == "homenet-cli"
 
 
-def test_download_https_refuses_http_and_bad_status():
-    opener = _Opener(_Body(b"x"))
-    with pytest.raises(SpeedError, match="https"):
-        list(download_https("http://example.com/", 1, opener=opener))
-    assert opener.req is None
-    http_error = urllib.error.HTTPError("https://x", 500, "no", hdrs=None, fp=None)
-    with pytest.raises(SpeedError, match="HTTP 500"):
-        list(download_https("https://speed.cloudflare.com/x", 1, opener=_Opener(http_error)))
-    with pytest.raises(SpeedError, match="HTTP 404"):
-        list(download_https("https://speed.cloudflare.com/x", 1, opener=_Opener(_Body(b"x", 404))))
+@pytest.mark.parametrize(
+    ("url", "resp", "match"),
+    [
+        ("http://example.com/", _Body(b"x"), "https"),
+        (
+            "https://speed.cloudflare.com/x",
+            urllib.error.HTTPError("https://x", 500, "no", hdrs=None, fp=None),
+            "HTTP 500",
+        ),
+        ("https://speed.cloudflare.com/x", _Body(b"x", 404), "HTTP 404"),
+    ],
+    ids=["http-url", "http-500", "status-404"],
+)
+def test_download_https_refuses_http_and_bad_status(url, resp, match):
+    opener = _Opener(resp)
+    with pytest.raises(SpeedError, match=match):
+        list(download_https(url, 1, opener=opener))
+    if match == "https":
+        assert opener.req is None
 
 
 def test_speed_opener_verifies_tls_and_ignores_proxy_env(monkeypatch):
