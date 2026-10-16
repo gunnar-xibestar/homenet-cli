@@ -158,6 +158,23 @@ class _Command:
     scan: bool = False
     ip: bool = False
     json: bool = False
+    sudo: bool = False
+
+
+# Root changes the ping sweep: nmap then reports MAC addresses and makers.
+# ports (-sT), services (-sT -sV), and router (HTTP) do not.
+_SUDO_SECTION = (
+    "Running with sudo (Debian/Ubuntu)\n"
+    "  Root adds MAC addresses and makers for devices, device, baseline,\n"
+    "  and new-devices. sudo resets PATH, so plain `sudo homenet` cannot\n"
+    '  find a venv\'s homenet and fails with "command not found". Look the\n'
+    "  program up in your own shell first:\n"
+    "\n"
+    '    sudo "$(command -v homenet)" devices\n'
+    "\n"
+    "  The same form works for a pipx install. doctor, whoami-net, explain,\n"
+    "  and speed do not need sudo."
+)
 
 
 _COMMANDS: tuple[_Command, ...] = (
@@ -178,6 +195,7 @@ _COMMANDS: tuple[_Command, ...] = (
         "homenet devices",
         scan=True,
         json=True,
+        sudo=True,
     ),
     _Command(
         "device",
@@ -188,6 +206,7 @@ _COMMANDS: tuple[_Command, ...] = (
         scan=True,
         ip=True,
         json=True,
+        sudo=True,
     ),
     _Command(
         "ports",
@@ -225,6 +244,7 @@ _COMMANDS: tuple[_Command, ...] = (
         "Later, `homenet new-devices` compares against this snapshot.",
         "homenet baseline",
         scan=True,
+        sudo=True,
     ),
     _Command(
         "new-devices",
@@ -237,6 +257,7 @@ _COMMANDS: tuple[_Command, ...] = (
         "homenet new-devices",
         scan=True,
         json=True,
+        sudo=True,
     ),
     _Command(
         "speed",
@@ -264,6 +285,13 @@ def _description(spec: _Command) -> str:
     if spec.scan:
         return f"{spec.description}\n\n{BANNER}"
     return spec.description
+
+
+def _epilog(spec: _Command) -> str:
+    example = f"Example:\n  {spec.example}"
+    if spec.sudo:
+        return f"{example}\n\n{_SUDO_SECTION}"
+    return example
 
 
 def _not_implemented(args: argparse.Namespace) -> int:
@@ -1016,7 +1044,7 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
         spec.name,
         help=spec.summary,
         description=_description(spec),
-        epilog=f"Example:\n  {spec.example}",
+        epilog=_epilog(spec),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.json_mode = json_mode
@@ -1052,6 +1080,7 @@ def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
             "\n"
             f"{BANNER}"
         ),
+        epilog=_SUDO_SECTION,
         formatter_class=_HelpFormatter,
         json_mode=json_mode,
     )

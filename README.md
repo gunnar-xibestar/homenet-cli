@@ -69,15 +69,17 @@ If a tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo a
 
 ### Privileges
 
-Scans work as a normal user. No command runs a SYN scan. `services` uses `-sT -sV --version-light` and works without root. `ports` is a TCP connect scan (`-sT`) and works without root too. Sudo mainly adds MAC addresses and vendors to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
+Scans work as a normal user. No command runs a SYN scan. `ports` is a TCP connect scan (`-sT`) and works without root. `services` uses `-sT -sV --version-light` and works without root too. `router` only requests the gateway's admin page, so root does not change that result. Root adds MAC addresses and makers to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
 
-When doctor warns about privileges, MAC addresses and makers need a scan run with sudo. `homenet doctor` does not need sudo. `sudo` resets `PATH`, so `sudo homenet devices` fails with "command not found" when homenet came from a venv or pipx. Use the absolute path doctor prints, or:
+### Running with sudo (Debian/Ubuntu)
+
+When doctor warns about privileges, MAC addresses and makers need a scan run with sudo. `sudo` resets `PATH`, so plain `sudo homenet` cannot find a venv's `homenet` and fails with "command not found". Look the program up in your own shell first, or use the absolute path doctor prints:
 
 ```bash
 sudo "$(command -v homenet)" devices
 ```
 
-A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
+The same form works for a pipx install. `doctor`, `whoami-net`, `explain`, and `speed` do not need sudo. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
 
 ## Quick start
 
@@ -159,17 +161,17 @@ $ nmap -sn -T4 -oX - 192.168.1.0/24
 
 ## Troubleshooting
 
-### `sudo: homenet: command not found` in a venv or pipx
+### Running with sudo (Debian/Ubuntu)
 
-`sudo` keeps a short `PATH`. It does not see `homenet` when that command lives in a virtualenv or in pipx's bin directory. `homenet doctor` does not need sudo, and running `sudo homenet doctor` fails the same way.
+`sudo` resets `PATH`, so plain `sudo homenet` fails with `sudo: homenet: command not found` when that command lives in a virtualenv. sudo cannot find the venv's `homenet`. `doctor`, `whoami-net`, `explain`, and `speed` do not need sudo, and `sudo homenet doctor` fails the same way.
 
-When you want MAC addresses and makers, run the scan through the program file itself. Doctor prints a line you can copy. You can also look the command up in your own shell, before sudo starts:
+When you want MAC addresses and makers, look the program up in your own shell, before sudo starts. Doctor prints a line you can copy.
 
 ```bash
 sudo "$(command -v homenet)" devices
 ```
 
-`command -v` prints the absolute path, and the quotes hand that path to sudo. The same form works for `device` and `baseline`.
+`command -v` prints the absolute path, and the quotes hand that path to sudo. The same form works for a pipx install, and for `device`, `baseline`, and `new-devices`.
 
 ### WSL 2 shows a virtual network, not the home LAN
 
