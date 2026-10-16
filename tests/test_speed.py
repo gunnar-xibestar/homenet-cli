@@ -1,19 +1,17 @@
-"""Download-speed sample. The fetch is injected; nothing here touches the network."""
+"""Parallel download-speed test. The fetch is injected; nothing here touches the network."""
 
 from __future__ import annotations
 
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
+from homenet.core.commands import plan_speed, set_command_hook
 from homenet.core.speed import (
-    DEFAULT_BYTES,
-    DEFAULT_TIMEOUT,
-    DEFAULT_URL,
-    MAX_BYTES,
     SpeedError,
     _NoRedirect,
     build_speed_opener,
@@ -30,7 +28,8 @@ class _Body:
 
     def read(self, n: int) -> bytes:
         self.read_arg = n
-        return self.data[:n]
+        out, self.data = self.data[:n], self.data[n:]
+        return out
 
     def __enter__(self):
         return self
@@ -53,101 +52,128 @@ class _Opener:
         return self.resp
 
 
-def _clock(*values):
-    pending = iter(values)
+class FakeClock:
+    """Per-thread timeline: each connection advances its own time, so runs are exact."""
 
-    def clock() -> float:
-        return next(pending)
+    def __init__(self) -> None:
+        self.local = threading.local()
 
-    return clock
+    def __call__(self) -> float:
+        return getattr(self.local, "t", 0.0)
 
+    def fetcher(
+        self, *, chunk=156_250, dt=0.125, slow_until=0.0, per_request=None, fail_first=False
+    ):
+        """10 Mbps chunks (1 Mbps before ``slow_until``); ``per_request`` chunks per body."""
+        calls = []
+        lock = threading.Lock()
 
-def test_measure_download_reports_decimal_megabits():
-    seen = {}
+        def fetch(url, timeout):
+            with lock:
+                calls.append(url)
+                first = len(calls) == 1
+            if fail_first and first:
+                raise OSError("boom")
+            n = 0
+            while per_request is None or n < per_request:
+                self.local.t = self() + dt
+                n += 1
+                yield b"x" * (chunk // 10 if self() < slow_until else chunk)
 
-    def fetch(url, timeout, max_bytes):
-        seen["url"] = url
-        seen["timeout"] = timeout
-        seen["max_bytes"] = max_bytes
-        return b"x" * max_bytes
-
-    result = measure_download(fetch=fetch, clock=_clock(10.0, 11.0))
-    assert seen["url"] == DEFAULT_URL.format(nbytes=DEFAULT_BYTES)
-    assert seen["url"].startswith("https://")
-    assert seen["timeout"] == DEFAULT_TIMEOUT
-    assert seen["max_bytes"] == DEFAULT_BYTES
-    assert result.bytes_read == DEFAULT_BYTES
-    assert result.seconds == 1.0
-    assert result.download_mbps == 8.0
-
-
-def test_measure_download_caps_the_body_and_a_stuck_clock():
-    result = measure_download(
-        fetch=lambda *_args: b"z" * 500,
-        nbytes=100,
-        clock=_clock(5.0, 5.0),
-    )
-    assert result.bytes_read == 100
-    assert result.seconds == 0.001
+        fetch.calls = calls
+        return fetch
 
 
-def test_measure_download_rejects_a_bad_sample_before_fetching():
-    def fetch(*_args):
-        raise AssertionError("fetch should not run")
-
-    with pytest.raises(SpeedError, match="between 1 and"):
-        measure_download(nbytes=0, fetch=fetch)
-    with pytest.raises(SpeedError, match="between 1 and"):
-        measure_download(nbytes=MAX_BYTES + 1, fetch=fetch)
-    with pytest.raises(SpeedError, match="https"):
-        measure_download(url="http://example.com/a", fetch=fetch)
-    with pytest.raises(SpeedError, match="password"):
-        measure_download(url="https://user:secret@example.com/a", fetch=fetch)
+def run(clock, fetch, **kw):
+    kw.setdefault("read_text", lambda p: "Linux version 6.6")
+    return measure_download(fetch=fetch, clock=clock, **kw)
 
 
-def test_measure_download_wraps_network_errors_and_an_empty_body():
-    def offline(*_args):
-        raise urllib.error.URLError("no route")
-
-    with pytest.raises(SpeedError, match="Could not measure") as exc:
-        measure_download(fetch=offline, clock=_clock(0.0, 1.0))
-    assert "homenet speed" in exc.value.hint
-
-    with pytest.raises(SpeedError, match="empty") as empty:
-        measure_download(fetch=lambda *_args: b"", clock=_clock(0.0, 1.0))
-    assert "homenet doctor" in empty.value.hint
-
-    def already(url, timeout, max_bytes):
-        raise SpeedError("custom", "keep this hint")
-
-    with pytest.raises(SpeedError, match="custom") as custom:
-        measure_download(fetch=already)
-    assert custom.value.hint == "keep this hint"
+def test_warmup_is_excluded_and_median_is_per_second():
+    clock = FakeClock()
+    r = run(clock, clock.fetcher(slow_until=1.0), connections=1, duration=4, warmup=1)
+    assert (r.mbps, r.median_mbps, r.seconds, r.warmup_s) == (10.42, 10.0, 3.0, 1.0)
+    assert r.bytes == 25 * 156_250 and r.total_bytes == r.bytes + 7 * 15_625
+    assert (r.download_mbps, r.bytes_read, r.errors, r.wsl) == (r.mbps, r.bytes, (), False)
 
 
-def test_measure_download_times_out_when_the_fetch_sticks():
-    started = threading.Event()
+def test_progress_ticks_once_a_second_and_callback_errors_are_swallowed():
+    clock, ticks = FakeClock(), []
+
+    def on_progress(*tick):
+        ticks.append(tick)
+        raise RuntimeError("UI broke")
+
+    r = run(clock, clock.fetcher(), connections=1, duration=4, warmup=1, on_progress=on_progress)
+    assert [t[:2] for t in ticks] == [(1.0, 4), (2.0, 4), (3.0, 4), (4.0, 4)]
+    assert ticks[0][2] == 0.0 and ticks[-1][2] == r.mbps
+
+
+def test_aggregates_across_connections_and_hook_sees_each_request():
+    clock, seen = FakeClock(), []
+    set_command_hook(seen.append)
+    try:
+        r = run(
+            clock,
+            clock.fetcher(per_request=4),
+            connections=3,
+            duration=2,
+            warmup=0,
+            read_text=lambda p: "Linux 5.15-microsoft-standard-WSL2",
+        )
+    finally:
+        set_command_hook(None)
+    assert (r.mbps, r.connections, r.wsl) == (30.0, 3, True)
+    planned = plan_speed(connections=3)
+    assert len(seen) == 12 and {c.url for c in seen} == {planned[0].url} and len(planned) == 3
+
+
+def test_total_byte_cap_stops_all_connections():
+    clock = FakeClock()
+    r = run(clock, clock.fetcher(), connections=2, duration=8, warmup=0, max_bytes=1_000_000)
+    assert r.total_bytes == 1_000_000 and r.seconds < 8
+
+
+def test_deadline_stops_and_bodies_are_re_requested():
+    clock = FakeClock()
+    fetch = clock.fetcher(per_request=4)
+    r = run(clock, fetch, connections=2, duration=3, warmup=0)
+    assert r.seconds == 3.0 and r.mbps == 20.0 and len(fetch.calls) == 12
+
+
+def test_hung_connection_hits_the_real_deadline():
     release = threading.Event()
 
-    def fetch(url, timeout, max_bytes):
-        started.set()
+    def hung(url, timeout):
         release.wait(5)
-        return b"x"
+        yield b""
 
-    try:
-        with pytest.raises(SpeedError, match="timed out") as exc:
-            measure_download(fetch=fetch, timeout=0.05, clock=_clock(0.0))
-        assert "internet" in exc.value.hint
-    finally:
-        release.set()
-    assert started.wait(1)
+    start = time.monotonic()
+    with pytest.raises(SpeedError, match="Could not measure"):
+        measure_download(fetch=hung, duration=0.2, warmup=0, timeout=0.2, read_text=lambda p: "")
+    release.set()
+    assert time.monotonic() - start < 2
 
 
-def test_download_https_reads_only_the_cap():
+def test_one_failing_connection_does_not_stop_the_others():
+    clock = FakeClock()
+    r = run(clock, clock.fetcher(fail_first=True), connections=3, duration=2, warmup=0)
+    assert (r.mbps, r.errors) == (20.0, ("OSError: boom",))
+
+
+@pytest.mark.parametrize(
+    "kw", [{"connections": 0}, {"duration": 0}, {"warmup": 8}, {"max_bytes": 0}, {"nbytes": 10**9}]
+)
+def test_bad_settings_are_rejected_before_fetching(kw):
+    with pytest.raises(SpeedError):
+        measure_download(fetch=lambda u, t: pytest.fail("fetched"), **kw)
+
+
+def test_download_https_streams_chunks():
     body = _Body(b"abcdef")
     opener = _Opener(body)
-    data = download_https("https://speed.cloudflare.com/__down?bytes=4", 3.0, 4, opener=opener)
-    assert data == b"abcd"
+    url = "https://speed.cloudflare.com/__down?bytes=6"
+    assert list(download_https(url, 3.0, opener=opener, chunk=4)) == [b"abcd", b"ef"]
     assert body.read_arg == 4
     assert opener.timeout == 3.0
     assert opener.req.get_method() == "GET"
@@ -157,13 +183,13 @@ def test_download_https_reads_only_the_cap():
 def test_download_https_refuses_http_and_bad_status():
     opener = _Opener(_Body(b"x"))
     with pytest.raises(SpeedError, match="https"):
-        download_https("http://example.com/", 1, 10, opener=opener)
+        list(download_https("http://example.com/", 1, opener=opener))
     assert opener.req is None
     http_error = urllib.error.HTTPError("https://x", 500, "no", hdrs=None, fp=None)
     with pytest.raises(SpeedError, match="HTTP 500"):
-        download_https("https://speed.cloudflare.com/x", 1, 10, opener=_Opener(http_error))
+        list(download_https("https://speed.cloudflare.com/x", 1, opener=_Opener(http_error)))
     with pytest.raises(SpeedError, match="HTTP 404"):
-        download_https("https://speed.cloudflare.com/x", 1, 10, opener=_Opener(_Body(b"x", 404)))
+        list(download_https("https://speed.cloudflare.com/x", 1, opener=_Opener(_Body(b"x", 404))))
 
 
 def test_speed_opener_verifies_tls_and_ignores_proxy_env(monkeypatch):
