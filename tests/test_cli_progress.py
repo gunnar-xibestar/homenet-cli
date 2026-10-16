@@ -18,7 +18,7 @@ from homenet.core import baseline, devices, netinfo, speed
 from homenet.core.baseline import DeviceDiff
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device
-from homenet.core.speed import SpeedResult
+from homenet.core.speed import SpeedError, SpeedResult
 from homenet.output import format_devices, format_devices_json, format_speed, format_speed_json
 
 NET = "192.168.1.0/24"
@@ -150,7 +150,12 @@ def test_snapshot_commands_use_the_baseline_api(command, fn, monkeypatch):
     assert seen["kwargs"]["resolve_names"] is True
 
 
-def test_speed_progress_shows_warmup_then_clears(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("tty", "json_mode"),
+    [(True, False), (False, False), (True, True)],
+    ids=["terminal", "non-terminal", "json"],
+)
+def test_speed_progress_shows_warmup_then_clears(tty, json_mode, monkeypatch, capsys):
     result = SpeedResult(
         215.2,
         50_000_000,
@@ -170,24 +175,40 @@ def test_speed_progress_shows_warmup_then_clears(monkeypatch, capsys):
             progress(3.0, 8.0, 212.4)
         return result
 
-    def run(argv, tty):
-        err = _Err(tty)
-        monkeypatch.setattr(sys, "stderr", err)
-        monkeypatch.setattr(speed, "measure_download", measure)
-        assert main(argv) == 0
-        return capsys.readouterr().out, err.getvalue()
-
-    out, blob = run(["speed"], True)
-    assert f"\r{warm}" in blob and f"\r{later}" in blob
-    assert "\n" not in blob and _visible_tail(blob) == ""
+    err = _Err(tty)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(speed, "measure_download", measure)
+    argv = ["speed", "--json"] if json_mode else ["speed"]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    blob = err.getvalue()
+    if json_mode:
+        assert blob == ""
+        assert out == format_speed_json(result) + "\n"
+        assert warm not in out and "\r" not in out
+        return
     assert out == format_speed(result) + "\n"
     assert "\r" not in out and warm not in out
+    if tty:
+        assert f"\r{warm}" in blob and f"\r{later}" in blob
+        assert "\n" not in blob and _visible_tail(blob) == ""
+    else:
+        assert blob == f"{warm}\n{later}\n"
 
-    out, blob = run(["speed"], False)
-    assert blob == f"{warm}\n{later}\n"
-    assert "\r" not in blob and out == format_speed(result) + "\n"
 
-    out, blob = run(["speed", "--json"], True)
-    assert blob == ""
-    assert out == format_speed_json(result) + "\n"
-    assert warm not in out and "\r" not in out
+def test_speed_failure_clears_the_line_before_the_error(monkeypatch):
+    stream = _Err(True)
+
+    def measure(**kwargs):
+        kwargs["on_progress"](3.0, 8.0, 212.4)
+        raise SpeedError("Could not measure your internet speed.", "Check the internet.")
+
+    monkeypatch.setattr(sys, "stderr", stream)
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(speed, "measure_download", measure)
+    assert main(["speed"]) == 1
+    blob = stream.getvalue()
+    error_at = blob.index("Could not measure your internet speed.")
+    before = blob[:error_at]
+    assert "about 212 Mbps so far" in before
+    assert _visible_tail(before) == ""

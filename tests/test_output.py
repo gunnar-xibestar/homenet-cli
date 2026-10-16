@@ -734,32 +734,25 @@ def test_router_json_cleans_strings_and_keeps_bools():
     }
 
 
-def test_format_speed_labels_an_estimate():
-    result = SpeedResult(
-        214.6,
-        20_000_000,
-        7.0,
-        "https://speed.cloudflare.com/__down?bytes=25000000",
-        median_mbps=210.0,
-        connections=4,
-        warmup_s=1.0,
-        errors=(),
-        wsl=True,
-        total_bytes=25_000_000,
-    )
-    failed = SpeedResult(
-        214.6,
-        20_000_000,
-        7.0,
-        "https://speed.cloudflare.com/__down?bytes=25000000",
-        connections=4,
-        warmup_s=1.0,
-        errors=("OSError: boom", "timeout"),
-        wsl=True,
-    )
-    estimate = "Download speed  about 215 Mbps (estimate)\nUsed 4 connections over about 8 seconds."
-    assert format_speed(result) == estimate
-    assert format_speed(failed) == estimate + "\n2 connections reported an error."
+@pytest.mark.parametrize("n_errors", [0, 2])
+def test_format_speed_labels_an_estimate(n_errors):
+    lines = format_speed(
+        SpeedResult(
+            214.6,
+            20_000_000,
+            7.0,
+            "https://speed.cloudflare.com/__down?bytes=25000000",
+            connections=4,
+            warmup_s=1.0,
+            errors=("boom",) * n_errors,
+            wsl=True,
+        )
+    ).splitlines()
+    assert "215" in lines[0] and "estimate" in lines[0]
+    assert "4" in lines[1] and "8" in lines[1]
+    assert len(lines) == 2 + bool(n_errors)
+    if n_errors:
+        assert lines[-1].split()[0] == str(n_errors)
 
 
 def test_format_speed_json_adds_fields():

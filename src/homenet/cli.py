@@ -39,9 +39,10 @@ intact. ``speed`` is the exception: progress is still on without ``--json``.
 On a terminal it rewrites one stderr line with a carriage return, for example
 ``Testing download speed... 3s of 8s, about 212 Mbps so far``, and says
 ``warming up`` while megabits per second are 0. That line is cleared before
-the result. When stderr is not a terminal, each update is a plain line with
-no carriage return. ``--json`` does not pass ``on_progress`` and writes no
-progress on stdout. There is no flag to turn progress off.
+the result or an error is printed. When stderr is not a terminal, each update
+is a plain line with no carriage return. ``--json`` does not pass
+``on_progress`` and writes no progress on stdout. There is no flag to turn
+progress off.
 ``-v`` prints core ``on_step`` text to stderr. ``-vv`` also passes
 ``stats_every=5`` and relays nmap progress. Displayed text goes through
 :func:`homenet.output._clean`. ``baseline`` calls
@@ -707,19 +708,24 @@ def _stderr_is_tty() -> bool:
 
 
 def _run_speed(args: argparse.Namespace) -> int:
+    """Run the download. Clear the live line before the result or any error."""
     progress = None if getattr(args, "json", False) else _SpeedProgress()
     args._status = progress
+    failure: speed.SpeedError | None = None
+    result = None
     try:
         if progress is None:
             result = speed.measure_download()
         else:
             result = speed.measure_download(on_progress=progress.update)
     except speed.SpeedError as exc:
-        return _fail(args, exc)
+        failure = exc
     finally:
         if progress is not None:
             progress.clear()
         args._status = None
+    if failure is not None:
+        return _fail(args, failure)
     if args.json:
         _print_ok(args, format_speed_json(result))
     else:
