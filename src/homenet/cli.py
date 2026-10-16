@@ -101,6 +101,7 @@ from homenet.core.checks import CheckResult
 from homenet.core.commands import planned_commands, set_command_hook
 from homenet.core.parser import Device, ParseError
 from homenet.core.runner import NmapError
+from homenet.core.wsl import is_wsl
 from homenet.output import (
     _clean,
     format_device,
@@ -463,9 +464,9 @@ def _run_dns(args: argparse.Namespace) -> int:
         config = dns.get_dns_servers(on_step=step)
         lookup = dns.dns_lookup_test(on_step=step)
     if args.json:
-        _print_ok(args, format_dns_json(config, lookup, gateway))
+        _print_ok(args, format_dns_json(config, lookup, gateway, wsl=is_wsl()))
     else:
-        print(format_dns(config, lookup, gateway))
+        print(format_dns(config, lookup, gateway, wsl=is_wsl()))
     return 0
 
 

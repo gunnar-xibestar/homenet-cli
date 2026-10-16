@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from homenet import __version__
+from homenet import __version__, cli
 from homenet.cli import BANNER, main
 from homenet.core import (
     baseline,
@@ -692,6 +692,7 @@ def test_wifi_and_dns_json(command, step, render, expect, capsys, monkeypatch):
     monkeypatch.setattr(dns, "get_dns_servers", get_dns)
     monkeypatch.setattr(dns, "dns_lookup_test", lookup_test)
     monkeypatch.setattr(netinfo, "detect", lambda: HOME)
+    monkeypatch.setattr(cli, "is_wsl", lambda: False)
     assert main([command, "-v", "--json"]) == 0
     captured = capsys.readouterr()
     assert captured.out and BANNER not in captured.out
