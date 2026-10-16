@@ -10,7 +10,9 @@
 It does not pass ``allow_subnet``.
 ``router`` asks :func:`homenet.core.router.check_router_admin`.
 ``speed`` asks :func:`homenet.core.speed.measure_download`.
-The home network scans come from core. This module does not spawn commands.
+The home network scans come from core. This module does not spawn commands
+or read ``/sys``. ``devices`` labels this computer from the
+:class:`~homenet.core.netinfo.NetInfo` core already collected, including ``mac``.
 
 ``new-devices`` exits 0 when the live scan matches the saved snapshot,
 1 when a device is new, missing, changed, or has a different MAC address,
@@ -376,10 +378,11 @@ def _run_devices(args: argparse.Namespace) -> int:
     found = _scan_home(args)
     if found is None:
         return 1
+    local = getattr(args, "_netinfo", None)
     if args.json:
-        _print_ok(args, format_devices_json(found))
+        _print_ok(args, format_devices_json(found, local=local))
     else:
-        print(format_devices(found))
+        print(format_devices(found, local=local))
     return 0
 
 
@@ -765,10 +768,12 @@ def _home_network() -> str:
 def _scan_home(args: argparse.Namespace) -> list[Device] | None:
     """Sweep the netinfo subnet. None means the error was already printed."""
     try:
-        network = _home_network()
+        info = netinfo.detect()
+        network = _subnet_from(info)
     except netinfo.NetInfoError as exc:
         _fail(args, exc)
         return None
+    args._netinfo = info
     try:
         with _activity(args, f"Scanning {network}…"):
             return devices.sweep(

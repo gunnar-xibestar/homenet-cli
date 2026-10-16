@@ -134,7 +134,6 @@ def test_whoami_net_prints_core_netinfo(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert captured.out == format_whoami(info) + "\n"
     assert captured.err == ""
-    assert "192.168.1.100/24" in captured.out
     assert "not implemented" not in captured.out
 
 
@@ -261,6 +260,49 @@ def test_devices_json_has_no_banner(capsys, monkeypatch):
     assert BANNER not in captured.out
     assert "\x1b" not in captured.out
     assert json.loads(captured.out)["devices"][0]["hostname"] == "x?[2Jy"
+
+
+def test_devices_labels_this_computer(capsys, monkeypatch):
+    mac = "b8:27:eb:aa:bb:cc"
+    me = Device("192.168.1.20", None, None, None)
+    other = Device("192.168.1.50", None, None, None)
+    _patch_detect(
+        monkeypatch, NetInfo("eth0", "192.168.1.20", "192.168.1.1", "192.168.1.0/24", mac=mac)
+    )
+    _patch_sweep(monkeypatch, [other, me])
+    assert main(["devices"]) == 0
+    rows = [line for line in capsys.readouterr().out.splitlines() if line[:3].isdigit()]
+    mine = next(line for line in rows if line.startswith("192.168.1.20"))
+    theirs = next(line for line in rows if line.startswith("192.168.1.50"))
+    assert "this computer" in mine and mac in mine
+    assert "this computer" not in theirs and mac not in theirs
+    assert "unknown" in theirs
+
+
+@pytest.mark.parametrize(
+    ("mac", "expected"),
+    [("b8:27:eb:aa:bb:cc", "b8:27:eb:aa:bb:cc"), (None, None)],
+    ids=["filled", "blank"],
+)
+def test_devices_json_marks_this_computer(mac, expected, capsys, monkeypatch):
+    me = Device("192.168.1.20", None, None, None)
+    other = Device("192.168.1.10", "AA:BB:CC:DD:EE:10", "Dell", "laptop")
+    plain = json.loads(format_devices_json([me, other]))
+    base = {item["ip"]: item for item in plain["devices"]}
+    _patch_detect(
+        monkeypatch, NetInfo("eth0", "192.168.1.20", "192.168.1.1", "192.168.1.0/24", mac=mac)
+    )
+    _patch_sweep(monkeypatch, [me, other])
+    assert main(["devices", "--json"]) == 0
+    by_ip = {item["ip"]: item for item in json.loads(capsys.readouterr().out)["devices"]}
+    assert by_ip["192.168.1.10"] == base["192.168.1.10"]
+    assert "is_self" not in by_ip["192.168.1.10"]
+    row = dict(by_ip["192.168.1.20"])
+    assert row.pop("is_self") is True
+    assert row.pop("mac") == expected
+    unchanged = dict(base["192.168.1.20"])
+    unchanged.pop("mac")
+    assert row == unchanged
 
 
 @pytest.mark.parametrize(
@@ -453,7 +495,7 @@ def test_whoami_json_prints_netinfo(capsys, monkeypatch):
     assert captured.err == ""
     loaded = json.loads(captured.out)
     assert (loaded["ip"], loaded["prefix"]) == (HOME.ip, 24)
-    assert f"{loaded['ip']}/{loaded['prefix']}" in format_whoami(HOME)
+    assert f"IP address    {loaded['ip']}" in format_whoami(HOME)
     assert BANNER not in captured.out
     assert "This computer" not in captured.out
 

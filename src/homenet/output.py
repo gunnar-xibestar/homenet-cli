@@ -7,11 +7,15 @@ Input shapes for Net Core to match:
 
 * :func:`format_whoami` takes one :class:`homenet.core.netinfo.NetInfo`.
   Fields it reads: ``interface``, ``ip``, ``gateway``, ``subnet``, ``wsl_nat``.
-  ``NetInfo`` has no MAC address, so this view does not show one.
+  The IP line is the address alone. A Network size line describes ``subnet``.
+  This view does not show ``mac``.
   When ``wsl_nat`` is true, the plain view adds a warning that this may be the
   WSL virtual network, not the home LAN.
 * :func:`format_devices` takes a sequence of :class:`homenet.core.parser.Device`
-  (the host list for ``homenet devices``).
+  (the host list for ``homenet devices``) and an optional ``local``
+  :class:`~homenet.core.netinfo.NetInfo`. A row whose IP is ``local.ip`` is
+  named ``this computer``. When that row has no MAC, the table and the JSON
+  ``mac`` field use ``local.mac``. JSON ``mac`` stays null when ``local.mac`` is missing.
 * :func:`format_device` takes one :class:`homenet.core.parser.Device`
   (the detail view for ``homenet device <ip>``), including its ``ports``
   list of :class:`homenet.core.parser.Port` (``number``, ``protocol``,
@@ -49,12 +53,16 @@ result (quotes, backslashes, and non-ASCII).
 
 ``homenet whoami-net --json``::
 
-    {"gateway": str|null, "interface": str|null, "ip": str|null,
-     "prefix": int|null, "subnet": str|null, "warning": str|null,
+    {"address_count": int|null, "gateway": str|null, "interface": str|null,
+     "ip": str|null, "prefix": int|null, "range_end": str|null,
+     "range_start": str|null, "subnet": str|null, "warning": str|null,
      "wsl_nat": bool}
 
-``ip`` is the address. ``prefix`` is the integer length the plain view shows
-after it (``address/prefix``). ``prefix`` is null when that line has no prefix.
+``ip`` is the address, without a prefix. ``prefix`` stays the subnet length
+when the subnet parses and uses the same IP version as ``ip``, and is null
+otherwise. ``address_count``, ``range_start``, and ``range_end`` match the
+Network size line: how many addresses the subnet holds, and the first and
+last. They are null when the subnet cannot be parsed. Existing keys stay.
 ``wsl_nat`` is true when the active address is inside WSL 2's NAT range.
 ``warning`` then says this may be the WSL virtual network, not the home LAN,
 and how to switch WSL to mirrored networking. Otherwise ``warning`` is null.
@@ -74,6 +82,11 @@ does not set ``ok`` to false.
      "ports": [{"number": int, "protocol": str|null, "service": str|null,
                 "state": str|null}, ...],
      "vendor": str|null}
+
+``homenet devices --json`` adds ``"is_self": true`` on the device whose IP
+is this computer. Other devices omit that key. When that device has no MAC,
+``mac`` is filled from this computer's netinfo address, and stays null when
+that address is unknown. Every other field stays as the scan reported it.
 
 ``homenet ports <ip> --json`` (open ports only)::
 
@@ -201,9 +214,10 @@ def format_whoami(info: NetInfo) -> str:
     """Table of this computer's address on the home network."""
     rows = (
         ("Interface", _text(info.interface, _NOT_AVAILABLE)),
-        ("IP address", _ip_with_prefix(info)),
+        ("IP address", _text(info.ip, _NOT_AVAILABLE)),
         ("Gateway", _text(info.gateway, _NOT_AVAILABLE)),
         ("Home network", _text(info.subnet, _NOT_AVAILABLE)),
+        ("Network size", _network_size(info)),
     )
     lines = ["This computer on your home network", "", _pairs(rows), "", *_WHOAMI_NOTES]
     if not info.ip:
@@ -214,8 +228,12 @@ def format_whoami(info: NetInfo) -> str:
     return "\n".join(lines)
 
 
-def format_devices(devices: Sequence[Device]) -> str:
-    """Table of hosts. One row per device: address, name, MAC, and maker."""
+def format_devices(devices: Sequence[Device], *, local: NetInfo | None = None) -> str:
+    """Table of hosts. One row per device: address, name, MAC, and maker.
+
+    When ``local`` is set, the row for ``local.ip`` is named ``this computer``.
+    A missing MAC on that row is filled from ``local.mac``.
+    """
     lines = ["Devices on your home network", ""]
     if not devices:
         lines.append("No devices were found.")
@@ -223,7 +241,7 @@ def format_devices(devices: Sequence[Device]) -> str:
         lines.append("Make sure this computer is connected to your home network, then try again.")
         return "\n".join(lines)
     ordered = sorted(devices, key=_device_sort_key)
-    lines.append(_device_table(ordered))
+    lines.append(_device_table(ordered, local=local))
     lines.append("")
     count = len(ordered)
     noun = "device" if count == 1 else "devices"
@@ -317,9 +335,11 @@ def format_diff(diff: DeviceDiff) -> str:
 def format_whoami_json(info: NetInfo) -> str:
     """JSON for ``homenet whoami-net --json``. See the module docstring.
 
-    ``ip`` and ``prefix`` are the same address and length the plain view shows.
+    ``ip`` is the address. ``prefix`` remains for callers that already read it.
+    ``address_count``, ``range_start``, and ``range_end`` match the size line.
     """
     ip, prefix = _address_prefix(info)
+    span = _network_span(info)
     warning = None
     if info.wsl_nat:
         network = _clean(info.subnet) or _clean(info.ip)
@@ -330,16 +350,20 @@ def format_whoami_json(info: NetInfo) -> str:
         "prefix": prefix,
         "gateway": _clean(info.gateway),
         "subnet": _clean(info.subnet),
+        "address_count": None if span is None else span[1],
+        "range_start": None if span is None else span[2],
+        "range_end": None if span is None else span[3],
         "wsl_nat": bool(info.wsl_nat),
         "warning": warning,
     }
     return _dumps(payload)
 
 
-def format_devices_json(devices: Sequence[Device]) -> str:
+def format_devices_json(devices: Sequence[Device], *, local: NetInfo | None = None) -> str:
     """JSON for ``homenet devices --json``. See the module docstring."""
     ordered = sorted(devices, key=_device_sort_key)
-    return _dumps({"devices": [_device_payload(device) for device in ordered]})
+    payloads = [_device_payload(device, local=local) for device in ordered]
+    return _dumps({"devices": payloads})
 
 
 def format_device_json(device: Device) -> str:
@@ -666,11 +690,11 @@ def _dumps(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def _device_payload(device: Device) -> dict:
-    return {
+def _device_payload(device: Device, *, local: NetInfo | None = None) -> dict:
+    payload = {
         "ip": _clean(device.ip),
         "hostname": _clean(device.hostname),
-        "mac": _clean(device.mac),
+        "mac": _clean(_source_mac(device, local)),
         "vendor": _clean(device.vendor),
         "ports": [
             {
@@ -682,23 +706,59 @@ def _device_payload(device: Device) -> dict:
             for port in sorted(device.ports, key=_port_sort_key)
         ],
     }
+    if _is_self(device, local):
+        payload["is_self"] = True
+    return payload
 
 
 def _pair_payload(old: Device, current: Device) -> dict:
     return {"before": _device_payload(old), "after": _device_payload(current)}
 
 
-def _device_table(devices: Sequence[Device]) -> str:
+def _device_table(devices: Sequence[Device], *, local: NetInfo | None = None) -> str:
     rows = [
         (
             _text(device.ip, _UNKNOWN),
-            _text(device.hostname, _UNKNOWN),
-            _text(device.mac, _UNKNOWN),
+            _row_name(device, local),
+            _row_mac(device, local),
             _text(device.vendor, _UNKNOWN),
         )
         for device in sorted(devices, key=_device_sort_key)
     ]
     return _render_table(("IP address", "Name", "MAC address", "Maker"), rows)
+
+
+def _is_self(device: Device, local: NetInfo | None) -> bool:
+    """True when ``device`` is the computer ``local`` describes."""
+    if local is None:
+        return False
+    return _same_ip(device.ip, local.ip)
+
+
+def _same_ip(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return ipaddress.ip_address(str(left).strip()) == ipaddress.ip_address(str(right).strip())
+    except ValueError:
+        return False
+
+
+def _row_name(device: Device, local: NetInfo | None) -> str:
+    if _is_self(device, local):
+        return _clean("this computer") or _UNKNOWN
+    return _text(device.hostname, _UNKNOWN)
+
+
+def _source_mac(device: Device, local: NetInfo | None) -> str | None:
+    """Scan MAC, or this computer's MAC when the scan left it blank."""
+    if _is_self(device, local) and not _clean(device.mac) and local is not None:
+        return local.mac
+    return device.mac
+
+
+def _row_mac(device: Device, local: NetInfo | None) -> str:
+    return _text(_source_mac(device, local), _UNKNOWN)
 
 
 def _sorted_pairs(pairs: Sequence[tuple[Device, Device]]) -> list[tuple[Device, Device]]:
@@ -783,7 +843,7 @@ def _noun(count: int, singular: str, plural: str) -> str:
 
 
 def _address_prefix(info: NetInfo) -> tuple[str | None, int | None]:
-    """Cleaned address and the prefix length plain text appends to it.
+    """Cleaned address and the subnet prefix length.
 
     The prefix is set only when the subnet parses and uses the same IP version.
     """
@@ -801,14 +861,31 @@ def _address_prefix(info: NetInfo) -> tuple[str | None, int | None]:
     return ip, network.prefixlen
 
 
-def _ip_with_prefix(info: NetInfo) -> str:
-    """Show ``address/prefix`` when the subnet uses the same IP version."""
-    ip, prefix = _address_prefix(info)
-    if not ip:
+def _network_span(info: NetInfo) -> tuple[int, int, str, str] | None:
+    """``(prefix, address count, first, last)`` for ``info.subnet``, or None."""
+    subnet = _clean(info.subnet)
+    if not subnet:
+        return None
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return None
+    start = _clean(str(network.network_address))
+    end = _clean(str(network.broadcast_address))
+    if not start or not end:
+        return None
+    return network.prefixlen, network.num_addresses, start, end
+
+
+def _network_size(info: NetInfo) -> str:
+    """Plain-English size of the subnet, or ``not available``."""
+    span = _network_span(info)
+    if span is None:
         return _NOT_AVAILABLE
-    if prefix is None:
-        return ip
-    return f"{ip}/{prefix}"
+    prefix, count, start, end = span
+    noun = "address" if count == 1 else "addresses"
+    text = f"/{prefix} ({count:,} {noun}: {start}\u2013{end})"
+    return _clean(text) or _NOT_AVAILABLE
 
 
 _clean = clean_text  # one shared sanitiser; see homenet.core._text
