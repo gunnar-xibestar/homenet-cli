@@ -1,0 +1,8 @@
+Connected to a4:2b:b0:11:22:33 (on wlp2s0)
+	SSID: Home WiFi
+	freq: 5180.0
+	RX: 123456 bytes (789 packets)
+	TX: 23456 bytes (123 packets)
+	signal: -52 dBm
+	rx bitrate: 780.0 MBit/s VHT-MCS 8 80MHz short GI VHT-NSS 2
+	tx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2

@@ -26,7 +26,11 @@ _TOOLS: dict[str, tuple[tuple[str, ...], str]] = {
     "nmap": (("--version",), "nmap"),
     "ip": (("-V",), "iproute2"),
     "ping": (("-V",), "iputils-ping"),
+    "nmcli": (("--version",), "network-manager"),
+    "iw": (("--version",), "iw"),
+    "resolvectl": (("--version",), "systemd-resolved"),
 }
+OPTIONAL_TOOLS = ("nmcli", "iw", "resolvectl")  # Wi-Fi / DNS extras; not in run_all_checks
 
 
 @dataclass
@@ -99,6 +103,18 @@ def check_tool(
     m = re.search(r"\d+(?:\.\d+)+\w*", out)
     version = m.group(0) if m else "unknown"
     return _ok(name, f"{name} {version} at {path}")
+
+
+def check_optional_tool(
+    name: str,
+    which: Callable[[str], str | None] | None = None,
+    run: Callable[[Sequence[str]], str] | None = None,
+) -> CheckResult:
+    """Like :func:`check_tool`, but a missing tool is only a warning."""
+    result = check_tool(name, which=which, run=run)
+    if result.ok:
+        return result
+    return CheckResult(result.name, False, result.detail, result.fix_hint, "warning")
 
 
 def _has_cap_net_raw(status_text: str) -> bool:
