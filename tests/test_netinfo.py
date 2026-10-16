@@ -34,24 +34,57 @@ def test_detect_with_ip(load_fixture):
     )
 
 
-def test_detect_mac_falls_back_to_none(load_fixture):
+@pytest.mark.parametrize(
+    ("contents", "mac"),
+    [("B8:27:EB:AA:BB:CC\n", "b8:27:eb:aa:bb:cc"), (None, None)],
+    ids=["read", "error"],
+)
+def test_detect_mac_falls_back_to_none(load_fixture, contents, mac):
     mac_path = "/sys/class/net/wlp2s0/address"
 
-    def read_ok(path):
-        if path == mac_path:
-            return "B8:27:EB:AA:BB:CC\n"
+    def read(path):
+        if contents is not None and path == mac_path:
+            return contents
         raise OSError(path)
 
-    info = detect(run=fake_ip(load_fixture), read_file=read_ok)
-    assert info.mac == "b8:27:eb:aa:bb:cc"
+    info = detect(run=fake_ip(load_fixture), read_file=read)
+    assert info.mac == mac
     assert info.ip == "192.168.1.100" and info.interface == "wlp2s0"
 
-    def read_fail(path):
-        raise OSError(path)
 
-    failed = detect(run=fake_ip(load_fixture), read_file=read_fail)
-    assert failed.mac is None
-    assert failed.ip == "192.168.1.100" and failed.interface == "wlp2s0"
+@pytest.mark.parametrize(
+    ("ifname", "contents"),
+    [
+        ("../../etc", "aa:bb:cc:dd:ee:ff\n"),
+        ("wlp2s0", "-1:+2:00:00:00:00\n"),
+    ],
+    ids=["bad-ifname", "bad-content"],
+)
+def test_interface_mac_rejects_bad_name_and_content(ifname, contents):
+    seen = []
+
+    def run(args):
+        if args[1] == "route":
+            body = [{"dst": "default", "gateway": "192.168.1.1", "dev": ifname, "metric": 0}]
+        elif args[1] == "addr":
+            body = [
+                {
+                    "ifname": ifname,
+                    "addr_info": [{"family": "inet", "local": "192.168.1.10", "prefixlen": 24}],
+                }
+            ]
+        else:
+            raise AssertionError(args)
+        return json.dumps(body)
+
+    def read(path):
+        seen.append(path)
+        return contents
+
+    info = detect(run=run, read_file=read)
+    assert info.interface == ifname
+    assert info.mac is None
+    assert not any(".." in path for path in seen)
 
 
 @pytest.mark.parametrize(

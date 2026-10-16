@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import shutil
 import socket
 import struct
@@ -158,22 +159,29 @@ def parse_proc_route(text: str) -> tuple[str, str | None, str | None]:
     return ifname, None if gw == "0.0.0.0" else gw, subnet  # noqa: S104
 
 
+def _safe_ifname(ifname: str) -> bool:
+    """True when ``ifname`` is a single path component, not ``..`` or a slash."""
+    if not ifname or ifname in {".", ".."}:
+        return False
+    if any(char in ifname for char in "/\\\x00"):
+        return False
+    return Path(ifname).name == ifname
+
+
 def _interface_mac(ifname: str, read_file: FileReader) -> str | None:
     """MAC from ``/sys/class/net/<ifname>/address``, or None on any error.
 
-    The interface name has to be a single path component so the read stays
-    under that sysfs directory. Anything that is not six hex bytes is ignored.
+    Unsafe names such as ``../../etc`` are rejected before the path is built.
+    The file must be six hex bytes; ``int(..., 16)`` is not used, because it
+    accepts signs.
     """
-    if not ifname or ifname in {".", ".."} or any(char in ifname for char in "/\\\x00"):
+    if not _safe_ifname(ifname):
         return None
     try:
         raw = read_file(f"/sys/class/net/{ifname}/address").strip().lower()
-        parts = raw.split(":")
-        if len(parts) != 6 or any(len(part) != 2 for part in parts):
-            return None
-        for part in parts:
-            int(part, 16)
     except Exception:  # noqa: BLE001 - a missing or unreadable MAC just means "no MAC"
+        return None
+    if re.fullmatch(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", raw) is None:
         return None
     return raw
 

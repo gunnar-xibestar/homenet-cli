@@ -126,12 +126,22 @@ def test_format_whoami_missing_or_unusable_fields(info, present, absent):
     assert all(s in text for s in present) and not any(s in text for s in absent)
 
 
-def test_whoami_states_the_network_size():
-    info = NetInfo("eth0", "192.168.5.10", "192.168.4.1", "192.168.4.0/22")
-    text = format_whoami(info)
-    assert "IP address    192.168.5.10\n" in text
-    assert "192.168.5.10/22" not in text
-    assert "Network size  /22 (1,024 addresses: 192.168.4.0\u2013192.168.7.255)" in text
+@pytest.mark.parametrize(
+    ("subnet", "count", "start", "end"),
+    [
+        ("10.1.0.0/16", 65536, "10.1.0.0", "10.1.255.255"),
+        ("192.168.1.0/31", 2, "192.168.1.0", "192.168.1.1"),
+        ("192.168.1.5/32", 1, "192.168.1.5", "192.168.1.5"),
+    ],
+    ids=["16", "31", "32"],
+)
+def test_whoami_network_size_edges(subnet, count, start, end):
+    loaded = json.loads(format_whoami_json(NetInfo("eth0", start, None, subnet)))
+    assert (loaded["address_count"], loaded["range_start"], loaded["range_end"]) == (
+        count,
+        start,
+        end,
+    )
 
 
 def test_format_error_includes_a_fix_when_one_is_known():
