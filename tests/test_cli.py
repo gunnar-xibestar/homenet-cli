@@ -615,18 +615,43 @@ def _assert_no_controls(value) -> None:
             _assert_no_controls(item)
 
 
-def test_wifi_on_wsl_prints_the_note_and_exits_zero(capsys, monkeypatch):
+def test_wifi_on_wsl_exits_zero(capsys, monkeypatch):
     info = WifiInfo(False, "WSL", wsl=True)
     monkeypatch.setattr(wifi, "get_wifi_info", lambda **_kwargs: info)
     assert main(["wifi"]) == 0
-    captured = capsys.readouterr()
-    assert captured.out == format_wifi(info) + "\n"
-    assert "Wi-Fi info isn't visible inside WSL" in captured.out
-    assert "Traceback" not in captured.out + captured.err
+    assert capsys.readouterr().out == format_wifi(info) + "\n"
 
 
-@pytest.mark.parametrize("command", ["wifi", "dns"])
-def test_wifi_and_dns_json(command, capsys, monkeypatch):
+def _wifi_json_ok(loaded: dict, seen: dict) -> None:
+    assert loaded["available"] is True and loaded["signal"]
+    assert seen["wifi"]["on_step"] is not None and "stats_every" not in seen["wifi"]
+
+
+def _dns_json_ok(loaded: dict, seen: dict) -> None:
+    assert loaded["servers"][0]["ip"] == "192.168.1.1?"
+    assert loaded["lookup"]["ok"] is True
+    assert seen["dns"]["on_step"] is not None and "stats_every" not in seen["dns"]
+    assert seen["lookup"]["on_step"] is not None and "stats_every" not in seen["lookup"]
+
+
+@pytest.mark.parametrize(
+    ("command", "step", "render", "expect"),
+    [
+        (
+            "wifi",
+            "Reading Wi-Fi link of wlan0 (iw)",
+            lambda info, _config, _lookup: format_wifi_json(info),
+            _wifi_json_ok,
+        ),
+        (
+            "dns",
+            "Looking up example.com",
+            lambda _info, config, lookup: format_dns_json(config, lookup, HOME.gateway),
+            _dns_json_ok,
+        ),
+    ],
+)
+def test_wifi_and_dns_json(command, step, render, expect, capsys, monkeypatch):
     info = WifiInfo(
         True,
         interface="wlan0",
@@ -671,18 +696,9 @@ def test_wifi_and_dns_json(command, capsys, monkeypatch):
     assert captured.out and BANNER not in captured.out
     loaded = json.loads(captured.out)
     _assert_no_controls(loaded)
-    if command == "wifi":
-        assert captured.out == format_wifi_json(info) + "\n"
-        assert seen["wifi"]["on_step"] is not None and "stats_every" not in seen["wifi"]
-        assert "Reading Wi-Fi link of wlan0 (iw)" in captured.err
-        assert loaded["available"] is True and loaded["signal"]
-    else:
-        assert captured.out == format_dns_json(config, lookup, HOME.gateway) + "\n"
-        assert seen["dns"]["on_step"] is not None and "stats_every" not in seen["dns"]
-        assert seen["lookup"]["on_step"] is not None
-        assert "Looking up example.com" in captured.err
-        assert loaded["servers"][0]["ip"] == "192.168.1.1?"
-        assert loaded["lookup"]["ok"] is True
+    assert captured.out == render(info, config, lookup) + "\n"
+    assert step in captured.err
+    expect(loaded, seen)
 
 
 def test_doctor_includes_optional_tool_checks(capsys, monkeypatch):

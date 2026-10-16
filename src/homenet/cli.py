@@ -307,10 +307,11 @@ _COMMANDS: tuple[_Command, ...] = (
         "dns",
         "Show DNS servers and try a lookup",
         "List the DNS servers this computer is using, say who they likely belong to, "
-        "and look up example.com. The gateway is your router. 1.1.1.1 and 1.0.0.1 "
-        "are Cloudflare, 8.8.8.8 and 8.8.4.4 are Google, and 9.9.9.9 is Quad9. "
-        "127.0.0.53, or any other loopback address, is this computer's local resolver, "
-        "and the servers behind it are listed too.\n"
+        "and look up example.com. The gateway is your router. A loopback address "
+        "is this computer's local resolver, and the servers behind it are listed too. "
+        "Cloudflare, Google, and Quad9 are named, including their IPv6 networks. "
+        "Another private or link-local address is a device on your network. "
+        "Any other public address is likely your internet provider.\n"
         "\n"
         "dns does not need sudo.",
         "homenet dns",

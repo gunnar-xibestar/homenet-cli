@@ -35,10 +35,11 @@ Input shapes for Net Core to match:
   On WSL the plain view is the note that Wi-Fi info isn't visible inside WSL.
 * :func:`format_dns` takes a :class:`~homenet.core.dns.DnsConfig`, a
   :class:`~homenet.core.dns.LookupResult`, and an optional gateway address.
-  Each server is labeled: the gateway is ``your router``; 1.1.1.1 and 1.0.0.1
-  are Cloudflare; 8.8.8.8 and 8.8.4.4 are Google; 9.9.9.9 is Quad9; a loopback
-  address is this computer's local resolver (upstream servers are listed too).
-  Anything else is likely the internet provider. The lookup is one line.
+  Each server is labeled, in order: the gateway is ``your router``; a loopback
+  address is this computer's local resolver (upstream servers are listed too);
+  Cloudflare, Google, and Quad9 ranges (IPv4 hosts and their IPv6 networks);
+  any other private or link-local address is a device on your network; any
+  other global address is likely the internet provider. The lookup is one line.
 
 Missing device fields (``hostname``, ``mac``, ``vendor``, ``service``) are
 shown as ``unknown``. Missing network fields are shown as ``not available``.
@@ -608,13 +609,19 @@ def format_speed_json(result: SpeedResult) -> str:
 
 _WSL_WIFI = "Wi-Fi info isn't visible inside WSL"
 _SIGNAL_UNKNOWN = "unknown (install iw to see signal)"
-_PUBLIC_DNS = {
-    "1.1.1.1": "Cloudflare (public)",
-    "1.0.0.1": "Cloudflare (public)",
-    "8.8.8.8": "Google (public)",
-    "8.8.4.4": "Google (public)",
-    "9.9.9.9": "Quad9 (public)",
-}
+# Hosts and networks, checked after the gateway and loopback. IPv4 resolvers
+# are single addresses; IPv6 resolvers are the provider's allocated range.
+_PROVIDER_NETWORKS = (
+    (ipaddress.ip_network("1.1.1.1/32"), "Cloudflare (public)"),
+    (ipaddress.ip_network("1.0.0.1/32"), "Cloudflare (public)"),
+    (ipaddress.ip_network("2606:4700:4700::/48"), "Cloudflare (public)"),
+    (ipaddress.ip_network("8.8.8.8/32"), "Google (public)"),
+    (ipaddress.ip_network("8.8.4.4/32"), "Google (public)"),
+    (ipaddress.ip_network("2001:4860:4860::/48"), "Google (public)"),
+    (ipaddress.ip_network("9.9.9.9/32"), "Quad9 (public)"),
+    (ipaddress.ip_network("149.112.112.112/32"), "Quad9 (public)"),
+    (ipaddress.ip_network("2620:fe::/48"), "Quad9 (public)"),
+)
 _WIFI_REASONS = {
     "no Wi-Fi interface": "No Wi-Fi adapter was found on this computer.",
     "nmcli/iw not installed": "Wi-Fi tools are not installed. Install iw to see the signal.",
@@ -776,15 +783,21 @@ def _mbps(value: float) -> str:
     return _clean(f"{number} Mb/s") or _UNKNOWN
 
 
-def _canonical(value: str | None) -> str | None:
-    """Printable IP text in canonical form, or None when it is not an IP."""
+def _address(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parsed IP, or None when the text is empty or not an address."""
     text = _clean(value)
     if not text:
         return None
     try:
-        return str(ipaddress.ip_address(text))
+        return ipaddress.ip_address(text)
     except ValueError:
         return None
+
+
+def _canonical(value: str | None) -> str | None:
+    """Printable IP text in canonical form, or None when it is not an IP."""
+    address = _address(value)
+    return None if address is None else str(address)
 
 
 def _show_ip(value: str | None) -> str:
@@ -792,20 +805,35 @@ def _show_ip(value: str | None) -> str:
 
 
 def _is_loopback(value: str | None) -> bool:
-    text = _canonical(value)
-    if text is None:
-        return False
-    return ipaddress.ip_address(text).is_loopback
+    address = _address(value)
+    return address is not None and address.is_loopback
+
+
+def _provider_label(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    for network, label in _PROVIDER_NETWORKS:
+        if address.version == network.version and address in network:
+            return label
+    return None
 
 
 def _server_label(ip: str | None, gateway: str | None) -> str:
-    """Who this DNS server likely belongs to. The gateway wins over public names."""
-    if _canonical(ip) is not None and _canonical(ip) == _canonical(gateway):
+    """Who this DNS server likely belongs to.
+
+    Order: gateway, loopback, provider range, private or link-local, then any
+    other global address. The gateway wins even when it is also a public resolver.
+    """
+    address = _address(ip)
+    gateway_address = _address(gateway)
+    if address is not None and address == gateway_address:
         label = "your router"
-    elif (canonical := _canonical(ip)) in _PUBLIC_DNS:
-        label = _PUBLIC_DNS[canonical]
-    elif _is_loopback(ip):
+    elif address is not None and address.is_loopback:
         label = "this computer (local resolver)"
+    elif address is not None and (provider := _provider_label(address)):
+        label = provider
+    elif address is not None and (address.is_private or address.is_link_local):
+        label = "a device on your network"
+    elif address is not None and address.is_global:
+        label = "likely your internet provider"
     else:
         label = "likely your internet provider"
     return _clean(label) or "likely your internet provider"
