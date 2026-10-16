@@ -282,21 +282,34 @@ def test_devices_labels_this_computer(capsys, monkeypatch):
 def test_devices_json_marks_this_computer(capsys, monkeypatch):
     me = Device("192.168.1.20", None, None, None)
     other = Device("192.168.1.10", "AA:BB:CC:DD:EE:10", "Dell", "laptop")
-    _patch_detect(
-        monkeypatch,
-        NetInfo("eth0", "192.168.1.20", "192.168.1.1", "192.168.1.0/24", mac="b8:27:eb:aa:bb:cc"),
-    )
-    _patch_sweep(monkeypatch, [me, other])
-    assert main(["devices", "--json"]) == 0
-    loaded = json.loads(capsys.readouterr().out)
+    mac = "b8:27:eb:aa:bb:cc"
     plain = json.loads(format_devices_json([me, other]))
-    by_ip = {item["ip"]: item for item in loaded["devices"]}
     base = {item["ip"]: item for item in plain["devices"]}
-    assert by_ip["192.168.1.10"] == base["192.168.1.10"]
-    assert "is_self" not in by_ip["192.168.1.10"]
-    self_row = dict(by_ip["192.168.1.20"])
-    assert self_row.pop("is_self") is True
-    assert self_row == base["192.168.1.20"]
+
+    def run(info: NetInfo) -> dict[str, dict]:
+        _patch_detect(monkeypatch, info)
+        _patch_sweep(monkeypatch, [me, other])
+        assert main(["devices", "--json"]) == 0
+        loaded = json.loads(capsys.readouterr().out)
+        return {item["ip"]: item for item in loaded["devices"]}
+
+    def self_row(rows: dict[str, dict]) -> dict:
+        assert rows["192.168.1.10"] == base["192.168.1.10"]
+        assert "is_self" not in rows["192.168.1.10"]
+        row = dict(rows["192.168.1.20"])
+        assert row.pop("is_self") is True
+        return row
+
+    home = NetInfo("eth0", "192.168.1.20", "192.168.1.1", "192.168.1.0/24", mac=mac)
+    filled = self_row(run(home))
+    assert filled.pop("mac") == mac
+    unchanged = dict(base["192.168.1.20"])
+    unchanged.pop("mac")
+    assert filled == unchanged
+
+    blank = self_row(run(NetInfo("eth0", "192.168.1.20", "192.168.1.1", "192.168.1.0/24")))
+    assert blank["mac"] is None
+    assert blank == base["192.168.1.20"]
 
 
 @pytest.mark.parametrize(

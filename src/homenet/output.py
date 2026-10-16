@@ -14,7 +14,8 @@ Input shapes for Net Core to match:
 * :func:`format_devices` takes a sequence of :class:`homenet.core.parser.Device`
   (the host list for ``homenet devices``) and an optional ``local``
   :class:`~homenet.core.netinfo.NetInfo`. A row whose IP is ``local.ip`` is
-  named ``this computer``. When that row has no MAC, the table uses ``local.mac``.
+  named ``this computer``. When that row has no MAC, the table and the JSON
+  ``mac`` field use ``local.mac``. JSON ``mac`` stays null when ``local.mac`` is missing.
 * :func:`format_device` takes one :class:`homenet.core.parser.Device`
   (the detail view for ``homenet device <ip>``), including its ``ports``
   list of :class:`homenet.core.parser.Port` (``number``, ``protocol``,
@@ -83,8 +84,9 @@ does not set ``ok`` to false.
      "vendor": str|null}
 
 ``homenet devices --json`` adds ``"is_self": true`` on the device whose IP
-is this computer. Other devices omit that key. Every existing field stays
-as the scan reported it.
+is this computer. Other devices omit that key. When that device has no MAC,
+``mac`` is filled from this computer's netinfo address, and stays null when
+that address is unknown. Every other field stays as the scan reported it.
 
 ``homenet ports <ip> --json`` (open ports only)::
 
@@ -360,7 +362,7 @@ def format_whoami_json(info: NetInfo) -> str:
 def format_devices_json(devices: Sequence[Device], *, local: NetInfo | None = None) -> str:
     """JSON for ``homenet devices --json``. See the module docstring."""
     ordered = sorted(devices, key=_device_sort_key)
-    payloads = [_device_payload(device, is_self=_is_self(device, local)) for device in ordered]
+    payloads = [_device_payload(device, local=local) for device in ordered]
     return _dumps({"devices": payloads})
 
 
@@ -688,11 +690,11 @@ def _dumps(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def _device_payload(device: Device, *, is_self: bool = False) -> dict:
+def _device_payload(device: Device, *, local: NetInfo | None = None) -> dict:
     payload = {
         "ip": _clean(device.ip),
         "hostname": _clean(device.hostname),
-        "mac": _clean(device.mac),
+        "mac": _clean(_source_mac(device, local)),
         "vendor": _clean(device.vendor),
         "ports": [
             {
@@ -704,7 +706,7 @@ def _device_payload(device: Device, *, is_self: bool = False) -> dict:
             for port in sorted(device.ports, key=_port_sort_key)
         ],
     }
-    if is_self:
+    if _is_self(device, local):
         payload["is_self"] = True
     return payload
 
@@ -748,11 +750,15 @@ def _row_name(device: Device, local: NetInfo | None) -> str:
     return _text(device.hostname, _UNKNOWN)
 
 
-def _row_mac(device: Device, local: NetInfo | None) -> str:
-    mac = device.mac
+def _source_mac(device: Device, local: NetInfo | None) -> str | None:
+    """Scan MAC, or this computer's MAC when the scan left it blank."""
     if _is_self(device, local) and not _clean(device.mac) and local is not None:
-        mac = local.mac
-    return _text(mac, _UNKNOWN)
+        return local.mac
+    return device.mac
+
+
+def _row_mac(device: Device, local: NetInfo | None) -> str:
+    return _text(_source_mac(device, local), _UNKNOWN)
 
 
 def _sorted_pairs(pairs: Sequence[tuple[Device, Device]]) -> list[tuple[Device, Device]]:
