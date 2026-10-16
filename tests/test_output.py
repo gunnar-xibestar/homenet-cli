@@ -860,7 +860,7 @@ def test_dns_server_labels(ip, gateway, label):
         uses_systemd_stub=ip == "127.0.0.53",
         upstream=["9.9.9.9"] if local else [],
     )
-    lookup = LookupResult("example.com\x1b", True, ("93.184.216.34",), 12.0)
+    lookup = LookupResult("example.com\x1b", True, ("93.184.216.34", "2606:2800::1"), 12.0)
     text = format_dns(config, lookup, gateway)
     assert "\x1b" not in text
     row = next(line for line in text.splitlines() if ip in line.split())
@@ -869,7 +869,8 @@ def test_dns_server_labels(ip, gateway, label):
         assert "Cloudflare" not in text
     lookup_lines = [line for line in text.splitlines() if line.startswith("Lookup")]
     assert len(lookup_lines) == 1
-    assert "example.com?" in lookup_lines[0] and "93.184.216.34" in lookup_lines[0]
+    assert "example.com?" in lookup_lines[0]
+    assert "It returned: 93.184.216.34 (IPv4), 2606:2800::1 (IPv6)." in lookup_lines[0]
     upstream = [line for line in text.splitlines() if line.startswith("Upstream")]
     if local:
         assert len(upstream) == 1 and "9.9.9.9" in upstream[0] and "Quad9" in upstream[0]

@@ -901,6 +901,13 @@ def _upstream_payload(config: DnsConfig, gateway: str | None, wsl: bool = False)
     return [{"ip": ip, "label": label} for ip, label in _upstream_pairs(config, gateway, wsl)]
 
 
+def _ip_family(value: str) -> str:
+    address = _address(value)
+    if address is None:
+        return "address"
+    return "IPv6" if address.version == 6 else "IPv4"
+
+
 def _lookup_line(lookup: LookupResult) -> str:
     name = _clean(lookup.name) or "the name"
     if lookup.elapsed_ms is None:
@@ -909,8 +916,11 @@ def _lookup_line(lookup: LookupResult) -> str:
         timing = f" in {lookup.elapsed_ms:g} ms"
     if lookup.ok:
         addresses = [item for item in (_clean(addr) for addr in lookup.addresses) if item]
-        shown = ", ".join(addresses) if addresses else "an address"
-        text = f"Lookup of {name} succeeded{timing} ({shown})."
+        if addresses:
+            shown = ", ".join(f"{addr} ({_ip_family(addr)})" for addr in addresses)
+            text = f"Lookup of {name} succeeded{timing}. It returned: {shown}."
+        else:
+            text = f"Lookup of {name} succeeded{timing}."
     else:
         error = _clean(lookup.error) or "it did not answer"
         text = f"Lookup of {name} failed{timing}: {error}."
