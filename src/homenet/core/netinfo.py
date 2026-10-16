@@ -14,7 +14,7 @@ import socket
 import struct
 import subprocess  # noqa: S404 - argument lists only
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from homenet.core.commands import Command, run_command
@@ -38,6 +38,8 @@ class NetInfo:
     subnet: str | None
     # True when WSL 2 NAT means scans see the virtual network, not the home LAN.
     wsl_nat: bool = False
+    # MAC from /sys/class/net/<interface>/address. None when that file cannot be read.
+    mac: str | None = None
 
 
 ROUTE_ARGS = ("-j", "route", "show")
@@ -156,14 +158,36 @@ def parse_proc_route(text: str) -> tuple[str, str | None, str | None]:
     return ifname, None if gw == "0.0.0.0" else gw, subnet  # noqa: S104
 
 
+def _interface_mac(ifname: str, read_file: FileReader) -> str | None:
+    """MAC from ``/sys/class/net/<ifname>/address``, or None on any error.
+
+    The interface name has to be a single path component so the read stays
+    under that sysfs directory. Anything that is not six hex bytes is ignored.
+    """
+    if not ifname or ifname in {".", ".."} or any(char in ifname for char in "/\\\x00"):
+        return None
+    try:
+        raw = read_file(f"/sys/class/net/{ifname}/address").strip().lower()
+        parts = raw.split(":")
+        if len(parts) != 6 or any(len(part) != 2 for part in parts):
+            return None
+        for part in parts:
+            int(part, 16)
+    except Exception:  # noqa: BLE001 - a missing or unreadable MAC just means "no MAC"
+        return None
+    return raw
+
+
 def detect(
     run: CommandRunner = _run_ip,
     read_file: FileReader = _read_file,
     environ: Mapping[str, str] | None = None,
 ) -> NetInfo:
-    """Detect interface, IP, gateway and subnet. Raises :class:`NetInfoError`.
+    """Detect interface, IP, gateway, subnet, and MAC. Raises :class:`NetInfoError`.
 
-    ``wsl_nat`` is true when this is WSL and the active address is in 172.16.0.0/12.
+    ``mac`` comes from ``/sys/class/net/<interface>/address`` and is None when
+    that read fails. ``wsl_nat`` is true when this is WSL and the active
+    address is in 172.16.0.0/12.
     """
     ip_ok = True
     try:
@@ -177,7 +201,8 @@ def detect(
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise NetInfoError(f"Could not read addresses for {ifname}.") from exc
         ip, subnet = parse_interface_addr(addrs, ifname)
-        return _with_wsl(NetInfo(ifname, ip, gateway, subnet), environ, read_file)
+        info = NetInfo(ifname, ip, gateway, subnet, mac=_interface_mac(ifname, read_file))
+        return _with_wsl(info, environ, read_file)
     try:
         text = read_file("/proc/net/route")
     except OSError as exc:
@@ -186,11 +211,12 @@ def detect(
             "Install iproute2: sudo apt install iproute2",
         ) from exc
     ifname, gateway, subnet = parse_proc_route(text)
-    return _with_wsl(NetInfo(ifname, None, gateway, subnet), environ, read_file)
+    info = NetInfo(ifname, None, gateway, subnet, mac=_interface_mac(ifname, read_file))
+    return _with_wsl(info, environ, read_file)
 
 
 def _with_wsl(info: NetInfo, environ: Mapping[str, str] | None, read_file: FileReader) -> NetInfo:
     """Copy ``info`` with ``wsl_nat`` set. Does not read files unless the address matches."""
     if not wsl_nat_active(info.ip, info.subnet, environ=environ, read_text=read_file):
         return info
-    return NetInfo(info.interface, info.ip, info.gateway, info.subnet, wsl_nat=True)
+    return replace(info, wsl_nat=True)

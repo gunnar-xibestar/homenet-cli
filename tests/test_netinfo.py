@@ -26,9 +26,32 @@ def fake_ip(load_fixture):
 
 
 def test_detect_with_ip(load_fixture):
-    assert detect(run=fake_ip(load_fixture)) == NetInfo(
+    def unread(path):
+        raise OSError(path)
+
+    assert detect(run=fake_ip(load_fixture), read_file=unread) == NetInfo(
         "wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24"
     )
+
+
+def test_detect_mac_falls_back_to_none(load_fixture):
+    mac_path = "/sys/class/net/wlp2s0/address"
+
+    def read_ok(path):
+        if path == mac_path:
+            return "B8:27:EB:AA:BB:CC\n"
+        raise OSError(path)
+
+    info = detect(run=fake_ip(load_fixture), read_file=read_ok)
+    assert info.mac == "b8:27:eb:aa:bb:cc"
+    assert info.ip == "192.168.1.100" and info.interface == "wlp2s0"
+
+    def read_fail(path):
+        raise OSError(path)
+
+    failed = detect(run=fake_ip(load_fixture), read_file=read_fail)
+    assert failed.mac is None
+    assert failed.ip == "192.168.1.100" and failed.interface == "wlp2s0"
 
 
 @pytest.mark.parametrize(

@@ -34,9 +34,10 @@ _WHOAMI = """\
 This computer on your home network
 
 Interface     wlp2s0
-IP address    192.168.1.100/24
+IP address    192.168.1.100
 Gateway       192.168.1.1
 Home network  192.168.1.0/24
+Network size  /24 (256 addresses: 192.168.1.0–192.168.1.255)
 
 The interface is how this computer is connected, such as Wi-Fi.
 The IP address is this computer.
@@ -73,7 +74,7 @@ Open means a program is listening on that port.\
 """
 
 
-def test_format_whoami_shows_address_with_prefix():
+def test_format_whoami_shows_the_address():
     info = NetInfo("wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24")
     assert format_whoami(info) == _WHOAMI
     assert "Warning:" not in format_whoami(info)
@@ -123,6 +124,14 @@ def test_format_whoami_warns_on_wsl_nat():
 def test_format_whoami_missing_or_unusable_fields(info, present, absent):
     text = format_whoami(info)
     assert all(s in text for s in present) and not any(s in text for s in absent)
+
+
+def test_whoami_states_the_network_size():
+    info = NetInfo("eth0", "192.168.5.10", "192.168.4.1", "192.168.4.0/22")
+    text = format_whoami(info)
+    assert "IP address    192.168.5.10\n" in text
+    assert "192.168.5.10/22" not in text
+    assert "Network size  /22 (1,024 addresses: 192.168.4.0\u2013192.168.7.255)" in text
 
 
 def test_format_error_includes_a_fix_when_one_is_known():
@@ -426,50 +435,65 @@ def test_json_dumps_escapes_device_strings(device, wrapped, expected, snippets, 
         (
             NetInfo("wlp2s0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24"),
             {
+                "address_count": 256,
                 "gateway": "192.168.1.1",
                 "interface": "wlp2s0",
                 "ip": "192.168.1.100",
                 "prefix": 24,
+                "range_end": "192.168.1.255",
+                "range_start": "192.168.1.0",
                 "subnet": "192.168.1.0/24",
             },
         ),
         (
             NetInfo("eth0", "10.0.0.5", None, None),
             {
+                "address_count": None,
                 "gateway": None,
                 "interface": "eth0",
                 "ip": "10.0.0.5",
                 "prefix": None,
+                "range_end": None,
+                "range_start": None,
                 "subnet": None,
             },
         ),
         (
             NetInfo("eth0", "10.0.0.5", "10.0.0.1", "not-a-network"),
             {
+                "address_count": None,
                 "gateway": "10.0.0.1",
                 "interface": "eth0",
                 "ip": "10.0.0.5",
                 "prefix": None,
+                "range_end": None,
+                "range_start": None,
                 "subnet": "not-a-network",
             },
         ),
         (
             NetInfo("eth0", "10.0.0.5", "10.0.0.1", "fe80::/64"),
             {
+                "address_count": 2**64,
                 "gateway": "10.0.0.1",
                 "interface": "eth0",
                 "ip": "10.0.0.5",
                 "prefix": None,
+                "range_end": "fe80::ffff:ffff:ffff:ffff",
+                "range_start": "fe80::",
                 "subnet": "fe80::/64",
             },
         ),
         (
             NetInfo("eth0\x1b", None, "10.0.0.1", "10.0.0.0/24"),
             {
+                "address_count": 256,
                 "gateway": "10.0.0.1",
                 "interface": "eth0?",
                 "ip": None,
                 "prefix": None,
+                "range_end": "10.0.0.255",
+                "range_start": "10.0.0.0",
                 "subnet": "10.0.0.0/24",
             },
         ),
@@ -484,8 +508,6 @@ def test_whoami_json_matches_the_plain_address(info, expected):
     assert loaded.pop("warning") is None
     assert loaded == expected
     shown = "not available" if expected["ip"] is None else expected["ip"]
-    if expected["prefix"] is not None:
-        shown = f"{shown}/{expected['prefix']}"
     assert f"IP address    {shown}" in format_whoami(info)
 
 
