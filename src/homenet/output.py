@@ -699,24 +699,29 @@ def format_wifi_json(info: WifiInfo) -> str:
     return _dumps(payload)
 
 
-def format_dns(config: DnsConfig, lookup: LookupResult, gateway: str | None = None) -> str:
+def format_dns(
+    config: DnsConfig, lookup: LookupResult, gateway: str | None = None, *, wsl: bool = False
+) -> str:
     """DNS servers, who they likely belong to, and one lookup line."""
     lines = ["DNS servers", ""]
     if not config.servers:
         lines.append("No DNS servers were found.")
     else:
         rows = [
-            (_show_ip(server.ip), _server_label(server.ip, gateway)) for server in config.servers
+            (_show_ip(server.ip), _server_label(server.ip, gateway, wsl))
+            for server in config.servers
         ]
         lines.append(_render_table(("Server", "Who it is"), rows))
-        upstream = _upstream_line(config, gateway)
+        upstream = _upstream_line(config, gateway, wsl)
         if upstream:
             lines.extend(["", upstream])
     lines.extend(["", _lookup_line(lookup)])
     return "\n".join(lines)
 
 
-def format_dns_json(config: DnsConfig, lookup: LookupResult, gateway: str | None = None) -> str:
+def format_dns_json(
+    config: DnsConfig, lookup: LookupResult, gateway: str | None = None, *, wsl: bool = False
+) -> str:
     """JSON for ``homenet dns --json``. See the module docstring."""
     local = any(_is_loopback(server.ip) for server in config.servers)
     payload = {
@@ -728,11 +733,11 @@ def format_dns_json(config: DnsConfig, lookup: LookupResult, gateway: str | None
                 "ip": _canonical(server.ip) or _clean(server.ip),
                 "source": _clean(server.source),
                 "interface": _clean(server.interface),
-                "label": _server_label(server.ip, gateway),
+                "label": _server_label(server.ip, gateway, wsl),
             }
             for server in config.servers
         ],
-        "upstream": _upstream_payload(config, gateway) if local else [],
+        "upstream": _upstream_payload(config, gateway, wsl) if local else [],
         "lookup": _lookup_payload(lookup),
     }
     return _dumps(payload)
@@ -845,7 +850,7 @@ def _provider_label(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> s
 _WSL_DNS_RELAY = ipaddress.ip_address("10.255.255.254")
 
 
-def _server_label(ip: str | None, gateway: str | None) -> str:
+def _server_label(ip: str | None, gateway: str | None, wsl: bool = False) -> str:
     """Who this DNS server likely belongs to.
 
     Order: gateway, loopback, provider range, private or link-local, then any
@@ -857,7 +862,7 @@ def _server_label(ip: str | None, gateway: str | None) -> str:
         label = "your router"
     elif address is not None and address.is_loopback:
         label = "this computer (local resolver)"
-    elif address == _WSL_DNS_RELAY:
+    elif wsl and address == _WSL_DNS_RELAY:
         label = "WSL's built-in DNS relay (forwards to Windows)"
     elif address is not None and (provider := _provider_label(address)):
         label = provider
@@ -868,7 +873,9 @@ def _server_label(ip: str | None, gateway: str | None) -> str:
     return _clean(label) or "likely your internet provider"
 
 
-def _upstream_pairs(config: DnsConfig, gateway: str | None) -> list[tuple[str, str]]:
+def _upstream_pairs(
+    config: DnsConfig, gateway: str | None, wsl: bool = False
+) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
     for raw in config.upstream:
@@ -876,22 +883,22 @@ def _upstream_pairs(config: DnsConfig, gateway: str | None) -> list[tuple[str, s
         if not ip or _is_loopback(ip) or ip in seen:
             continue
         seen.add(ip)
-        pairs.append((ip, _server_label(ip, gateway)))
+        pairs.append((ip, _server_label(ip, gateway, wsl)))
     return pairs
 
 
-def _upstream_line(config: DnsConfig, gateway: str | None) -> str | None:
+def _upstream_line(config: DnsConfig, gateway: str | None, wsl: bool = False) -> str | None:
     if not any(_is_loopback(server.ip) for server in config.servers):
         return None
-    pairs = _upstream_pairs(config, gateway)
+    pairs = _upstream_pairs(config, gateway, wsl)
     if not pairs:
         return None
     shown = ", ".join(f"{ip} ({label})" for ip, label in pairs)
     return _clean(f"Upstream servers: {shown}.")
 
 
-def _upstream_payload(config: DnsConfig, gateway: str | None) -> list[dict]:
-    return [{"ip": ip, "label": label} for ip, label in _upstream_pairs(config, gateway)]
+def _upstream_payload(config: DnsConfig, gateway: str | None, wsl: bool = False) -> list[dict]:
+    return [{"ip": ip, "label": label} for ip, label in _upstream_pairs(config, gateway, wsl)]
 
 
 def _lookup_line(lookup: LookupResult) -> str:

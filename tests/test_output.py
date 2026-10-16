@@ -820,6 +820,21 @@ def test_wifi_signal_words(dbm, percent, phrase):
 
 
 @pytest.mark.parametrize(
+    ("wsl", "label"),
+    [(True, "WSL's built-in DNS relay (forwards to Windows)"), (False, "a device on your network")],
+)
+def test_wsl_dns_relay_label_only_inside_wsl(wsl, label):
+    config = DnsConfig([DnsServer("10.255.255.254", "resolv.conf")], source="resolv.conf")
+    lookup = LookupResult("example.com", True, ("93.184.216.34",), 12.0)
+    row = next(
+        line
+        for line in format_dns(config, lookup, "172.20.0.1", wsl=wsl).splitlines()
+        if "10.255.255.254" in line.split()
+    )
+    assert label in row
+
+
+@pytest.mark.parametrize(
     ("ip", "gateway", "label"),
     [
         ("192.168.1.1", "192.168.1.1", "your router"),
@@ -833,7 +848,6 @@ def test_wifi_signal_words(dbm, percent, phrase):
         ("127.0.0.53", "192.168.1.1", "this computer (local resolver)"),
         ("::1", None, "this computer (local resolver)"),
         ("192.168.1.2", "192.168.1.1", "a device on your network"),
-        ("10.255.255.254", "172.20.0.1", "WSL's built-in DNS relay (forwards to Windows)"),
         ("fe80::1", "192.168.1.1", "a device on your network"),
         ("1.2.3.4", "192.168.1.1", "likely your internet provider"),
     ],
