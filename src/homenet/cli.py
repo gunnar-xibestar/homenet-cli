@@ -30,6 +30,10 @@ Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
+Plain stdout ends with one blank line after the command handler returns, so
+the next shell prompt has a gap above it. ``--json`` does not add that line.
+``--help``, ``--version``, and usage errors leave argparse before the handler
+and stay unchanged. Output that already ends with a blank line is left alone.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -75,6 +79,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from typing import TextIO
 
 from homenet import __version__
 from homenet.core import (
@@ -1355,8 +1360,69 @@ def _add_explain(subparsers, json_mode: bool) -> None:
     parser.set_defaults(handler=_run_explain)
 
 
+class _StdoutTail:
+    """Forward stdout and remember whether it already ends with a blank line.
+
+    ``main`` installs this around one command handler. The handler's bytes are
+    written through unchanged. Afterwards, :meth:`padding` is the newline run
+    that leaves exactly one trailing blank line, or empty when one is already
+    there.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._ending_newlines = 0
+        self._had_content = False
+
+    def write(self, text: str) -> int:
+        written = self._stream.write(text)
+        if text:
+            self._note(text)
+        return written
+
+    def _note(self, text: str) -> None:
+        if not text.endswith("\n"):
+            self._had_content = True
+            self._ending_newlines = 0
+            return
+        extra = len(text) - len(text.rstrip("\n"))
+        body = text[:-extra]
+        if body:
+            self._had_content = True
+            self._ending_newlines = extra
+        else:
+            self._ending_newlines += extra
+
+    def padding(self) -> str:
+        """Newlines still needed so stdout ends with one trailing blank line.
+
+        A blank line is a ``\\n`` after the newline that finished the last
+        line of content. ``print`` already supplies that first newline, so the
+        usual padding is one more. ``\\n\\n`` at the end, or a lone ``\\n``
+        when the handler printed nothing else, is already a trailing blank
+        line and is not extended.
+        """
+        if self._ending_newlines >= 2:
+            return ""
+        if self._ending_newlines == 1 and not self._had_content:
+            return ""
+        if self._ending_newlines == 1 or not self._had_content:
+            return "\n"
+        return "\n\n"
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI. Returns a process exit code."""
+    """Run the CLI. Returns a process exit code.
+
+    After the command handler returns, plain text on stdout is given one
+    trailing blank line when it does not already end with one. ``--json``
+    skips that write so the document stays byte-for-byte unchanged.
+    ``--help``, ``--version``, and usage errors exit inside ``parse_args``
+    and never reach this step.
+    """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
     json_mode = "--json" in raw
     parser = build_parser(json_mode=json_mode)
@@ -1366,8 +1432,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.show_cmd = bool(getattr(args, "show_cmd", False) or "--show-cmd" in raw)
     # A ``-v`` before the command and another after it are both real. Count the raw argv.
     args.verbose = _verbose_count(raw)
+    stdout = sys.stdout
+    tail = _StdoutTail(stdout)
+    sys.stdout = tail
     try:
         _capture_commands(args)
-        return int(args.handler(args))
+        code = int(args.handler(args))
+        # One central gap before the next shell prompt. JSON stays untouched.
+        if not getattr(args, "json", False):
+            extra = tail.padding()
+            if extra:
+                stdout.write(extra)
+        return code
     finally:
+        sys.stdout = stdout
         set_command_hook(None)
