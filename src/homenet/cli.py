@@ -32,13 +32,16 @@ traceback.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
-Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after the
+Plain stdout ends with :data:`_TRAILING_BLANK_LINES` padding lines after the
 command handler returns, so the next shell prompt has a gap above it.
-``--json`` does not add those lines. An error printed by :func:`_fail_message`
-does not either, whatever the exit code, so ``new-devices`` still gets them
-when it finds changes and exits 1. ``--help``, ``--version``, and usage
-errors leave argparse before the handler and stay unchanged. Output that
-already ends with that many blank lines is left alone.
+Each line is a single middle dot (U+00B7). When stdout's encoding is not
+UTF-8, each line is a plain ``.`` instead. ``--json`` does not add those
+lines. An error printed by :func:`_fail_message` does not either, whatever
+the exit code, so ``new-devices`` still gets them when it finds changes and
+exits 1. ``--help``, ``--version``, and usage errors leave argparse before
+the handler and stay unchanged. The five lines always follow
+newline-terminated output. Blank lines already in that output are not the
+padding, so they do not reduce the five.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -139,7 +142,8 @@ BANNER = "Only scan networks you own or have permission to scan."
 _FRAMES = ("|", "/", "-", "\\")
 _TICK = 0.1
 _STATS_EVERY = 5
-# Blank lines after plain stdout, so the next shell prompt is not flush with the last line.
+# Padding lines after plain stdout, so the next shell prompt is not flush with the last line.
+# Each line is one middle dot (U+00B7), or "." when stdout's encoding is not UTF-8.
 _TRAILING_BLANK_LINES = 5
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
 _VERBOSE_HELP = "Show each step on stderr. Repeat (-vv) to include nmap's progress."
@@ -1018,7 +1022,7 @@ def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code
 
     ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
     ``--show-cmd --json`` also includes the ``commands`` seen before the failure.
-    Sets ``args._failed`` so :func:`main` does not add trailing blank lines
+    Sets ``args._failed`` so :func:`main` does not add trailing padding lines
     after this error.
     """
     args._failed = True
@@ -1372,55 +1376,53 @@ def _add_explain(subparsers, json_mode: bool) -> None:
     parser.set_defaults(handler=_run_explain)
 
 
+def _padding_mark(stream: TextIO) -> str:
+    """One character for a trailing padding line.
+
+    UTF-8 stdout gets U+00B7 MIDDLE DOT. Any other encoding, including a
+    missing one, gets ASCII ``.``.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if isinstance(encoding, str) and encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
+        return "\u00b7"
+    return "."
+
+
 class _StdoutTail:
-    """Forward stdout and remember how many trailing blank lines it already has.
+    """Forward stdout and remember whether it already ends with a newline.
 
     ``main`` installs this around one command handler. The handler's bytes are
-    written through unchanged. Afterwards, :meth:`padding` is the newline run
-    that leaves :data:`_TRAILING_BLANK_LINES` trailing blank lines, or empty
-    when that many are already there.
+    written through unchanged. Afterwards, :meth:`padding` is
+    :data:`_TRAILING_BLANK_LINES` lines, each a single padding mark. Those
+    lines are always written once the output ends with a newline. Blank lines
+    the handler already printed are not padding, so they do not reduce the five.
     """
 
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
-        self._ending_newlines = 0
+        self._ends_with_newline = False
         self._had_content = False
 
     def write(self, text: str) -> int:
         written = self._stream.write(text)
         if text:
-            self._note(text)
+            self._had_content = True
+            self._ends_with_newline = text.endswith("\n")
         return written
 
-    def _note(self, text: str) -> None:
-        if not text.endswith("\n"):
-            self._had_content = True
-            self._ending_newlines = 0
-            return
-        extra = len(text) - len(text.rstrip("\n"))
-        body = text[:-extra]
-        if body:
-            self._had_content = True
-            self._ending_newlines = extra
-        else:
-            self._ending_newlines += extra
-
     def padding(self) -> str:
-        """Newlines still needed so stdout ends with :data:`_TRAILING_BLANK_LINES`.
+        """Five padding lines, after a newline when the last line is unfinished.
 
-        A blank line is a ``\\n`` after the newline that finished the last
-        line of content. ``print`` already supplies that first newline.
-        Output that already ends with that many blank lines, or more, is
-        left alone. When the handler printed nothing, each newline is itself
-        a blank line.
+        Each line is one middle dot, or ``.`` when stdout is not UTF-8.
+        ``print`` already ends its text with a newline, so the usual case is
+        just those five lines. Output that already ends with blank lines is
+        still newline-terminated: the five lines follow the blanks. A blank
+        line is not a padding line, so an existing run does not shorten them.
         """
-        if self._had_content and self._ending_newlines == 0:
-            return "\n" * (1 + _TRAILING_BLANK_LINES)
-        have = self._ending_newlines - 1 if self._had_content else self._ending_newlines
-        need = _TRAILING_BLANK_LINES - have
-        if need <= 0:
-            return ""
-        return "\n" * need
+        lines = f"{_padding_mark(self._stream)}\n" * _TRAILING_BLANK_LINES
+        if self._had_content and not self._ends_with_newline:
+            return "\n" + lines
+        return lines
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._stream, name)
@@ -1429,12 +1431,14 @@ class _StdoutTail:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code.
 
-    After the command handler returns, plain text on stdout is given
-    :data:`_TRAILING_BLANK_LINES` trailing blank lines when it does not
-    already end with that many. ``--json`` skips that write, and so does a
-    run that printed an error through :func:`_fail_message`. The exit code
-    does not matter: ``new-devices`` exits 1 when it finds changes and still
-    gets the gap. ``--help``, ``--version``, and usage errors exit inside
+    After the command handler returns, plain text on stdout is followed by
+    :data:`_TRAILING_BLANK_LINES` padding lines. Each line is one middle dot,
+    or ``.`` when stdout's encoding is not UTF-8. The lines are always
+    written once the output ends with a newline; blank lines already there
+    do not replace them. ``--json`` skips that write, and so does a run that
+    printed an error through :func:`_fail_message`. The exit code does not
+    matter: ``new-devices`` exits 1 when it finds changes and still gets the
+    gap. ``--help``, ``--version``, and usage errors exit inside
     ``parse_args`` and never reach this step.
 
     ``BrokenPipeError`` (a reader such as ``head`` closed the pipe) exits 1
@@ -1456,8 +1460,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _capture_commands(args)
         code = int(args.handler(args))
-        # _TRAILING_BLANK_LINES before the next shell prompt. JSON stays
-        # untouched, and so does stdout after _fail_message printed an error.
+        # _TRAILING_BLANK_LINES of padding before the next shell prompt.
+        # JSON stays untouched, and so does stdout after _fail_message.
         if not getattr(args, "_failed", False) and not getattr(args, "json", False):
             extra = tail.padding()
             if extra:
