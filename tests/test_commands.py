@@ -106,8 +106,13 @@ def _run_router(fetched):
 
 
 def _run_speed(fetched):
-    speed.measure_download(nbytes=1000, fetch=lambda u, t, n: fetched.append(u) or b"x" * n)
-    return plan_speed(nbytes=1000)
+    speed.measure_download(
+        connections=1,
+        nbytes=1000,
+        max_bytes=1000,
+        fetch=lambda u, t: fetched.append(u) or [b"x" * 1000],
+    )
+    return plan_speed(connections=1, nbytes=1000)
 
 
 @pytest.mark.parametrize(

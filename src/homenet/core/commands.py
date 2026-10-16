@@ -75,12 +75,12 @@ def run_command(cmd: Command, timeout: float) -> subprocess.CompletedProcess:
     )
 
 
-def emit(callback: Callable[[str], None] | None, message: str) -> None:
+def emit(callback: Callable[..., None] | None, *args: object) -> None:
     """Call a progress/step callback; its exceptions never break the caller."""
     if callback is None:
         return
     try:
-        callback(message)
+        callback(*args)
     except Exception:  # noqa: BLE001, S110 - a broken UI callback must not stop a scan
         pass
 
@@ -240,17 +240,24 @@ def plan_router(gateway=None, *, local_network=None, timeout: float | None = Non
 
 
 def plan_speed(
-    *, nbytes: int | None = None, timeout: float | None = None, url: str | None = None
+    *,
+    connections: int | None = None,
+    nbytes: int | None = None,
+    timeout: float | None = None,
+    url: str | None = None,
 ) -> list[Command]:
+    """One request per parallel connection (each is re-requested until time is up)."""
     from homenet.core import speed
 
-    return [
-        speed.build_speed_command(
-            nbytes=speed.DEFAULT_BYTES if nbytes is None else nbytes,
-            timeout=speed.DEFAULT_TIMEOUT if timeout is None else timeout,
-            url=url,
-        )
-    ]
+    n = speed.DEFAULT_CONNECTIONS if connections is None else connections
+    if not 1 <= n <= speed.MAX_CONNECTIONS:
+        raise speed.SpeedError("The speed test settings are out of range.")
+    cmd = speed.build_speed_command(
+        nbytes=speed.DEFAULT_BYTES if nbytes is None else nbytes,
+        timeout=speed.DEFAULT_TIMEOUT if timeout is None else timeout,
+        url=url,
+    )
+    return [cmd] * n
 
 
 def plan_wifi(
