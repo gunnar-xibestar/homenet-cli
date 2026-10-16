@@ -161,7 +161,7 @@ def test_whoami_net_error_without_a_traceback(hint, capsys, monkeypatch):
     _patch_detect(monkeypatch, error)
     assert main(["whoami-net"]) == 1
     captured = capsys.readouterr()
-    assert captured.out == format_error(str(error), hint) + "\n" * 6
+    assert captured.out == format_error(str(error), hint) + "\n"
     assert ("Fix:" in captured.out) is (hint is not None)
     assert "Traceback" not in captured.out + captured.err
     assert "NetInfoError" not in captured.out
@@ -505,7 +505,8 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
         assert json.loads(captured.out)["has_changes"] is (code == 1)
         assert BANNER not in captured.out
     else:
-        assert captured.out == f"{BANNER}\n\n{format_diff(report)}" + "\n" * 6
+        ending = "\n" * 6 if code == 0 else "\n"
+        assert captured.out == f"{BANNER}\n\n{format_diff(report)}" + ending
 
 
 def test_whoami_json_prints_netinfo(capsys, monkeypatch):

@@ -30,11 +30,12 @@ Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
-Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after the
-command handler returns, so the next shell prompt has a gap above it.
-``--json`` does not add those lines. ``--help``, ``--version``, and usage
-errors leave argparse before the handler and stay unchanged. Output that
-already ends with that many blank lines is left alone.
+Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after a
+command that exits 0, so the next shell prompt has a gap above it.
+``--json`` does not add those lines. A non-zero exit does not either.
+``--help``, ``--version``, and usage errors leave argparse before the handler
+and stay unchanged. Output that already ends with that many blank lines is
+left alone.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -1420,11 +1421,11 @@ class _StdoutTail:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code.
 
-    After the command handler returns, plain text on stdout is given
+    After a command handler returns 0, plain text on stdout is given
     :data:`_TRAILING_BLANK_LINES` trailing blank lines when it does not
-    already end with that many. ``--json`` skips that write so the document
-    stays byte-for-byte unchanged. ``--help``, ``--version``, and usage
-    errors exit inside ``parse_args`` and never reach this step.
+    already end with that many. ``--json`` and any non-zero exit skip that
+    write. ``--help``, ``--version``, and usage errors exit inside
+    ``parse_args`` and never reach this step.
     """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
     json_mode = "--json" in raw
@@ -1441,8 +1442,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _capture_commands(args)
         code = int(args.handler(args))
-        # _TRAILING_BLANK_LINES before the next shell prompt. JSON stays untouched.
-        if not getattr(args, "json", False):
+        # _TRAILING_BLANK_LINES before the next shell prompt, and only after
+        # a successful command. JSON and error exits stay untouched.
+        if code == 0 and not getattr(args, "json", False):
             extra = tail.padding()
             if extra:
                 stdout.write(extra)
