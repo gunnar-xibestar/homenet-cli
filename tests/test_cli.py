@@ -61,14 +61,20 @@ _SUBCOMMANDS = (
     "explain",
 )
 
+# Root changes the ping sweep. ports, services, and router do not need it.
+_SUDO_HELP = frozenset({"devices", "device", "baseline", "new-devices"})
+
 
 @pytest.mark.parametrize("command", [None, *_SUBCOMMANDS])
 def test_help_exits_zero(command, capsys):
-    """Smoke test only: every --help renders and exits 0. Wording is not pinned."""
+    """Every --help exits 0 with output. Only the sudo heading is checked."""
     with pytest.raises(SystemExit) as exc:
         main([command, "--help"] if command else ["--help"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip()
+    out = capsys.readouterr().out
+    assert out.strip()
+    heading = "Running with sudo (Debian/Ubuntu)"
+    assert (heading in out) is (command is None or command in _SUDO_HELP)
 
 
 @pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
