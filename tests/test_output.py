@@ -5,11 +5,13 @@ import json
 import pytest
 
 from homenet.core.baseline import diff_devices, load_baseline
+from homenet.core.dns import DnsConfig, DnsServer, LookupResult
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port, parse_nmap_xml
 from homenet.core.port_notes import notes_for_ports
 from homenet.core.router import AdminPage, RouterCheck
 from homenet.core.speed import SpeedResult
+from homenet.core.wifi import WifiInfo
 from homenet.output import (
     format_device,
     format_device_json,
@@ -17,6 +19,7 @@ from homenet.output import (
     format_devices_json,
     format_diff,
     format_diff_json,
+    format_dns,
     format_error,
     format_ports,
     format_ports_json,
@@ -28,6 +31,7 @@ from homenet.output import (
     format_speed_json,
     format_whoami,
     format_whoami_json,
+    format_wifi,
 )
 
 _WHOAMI = """\
@@ -747,3 +751,79 @@ def test_format_speed_uses_megabits():
         "seconds": 0.5,
         "url": "https://example.test/?",
     }
+
+
+@pytest.mark.parametrize(
+    ("dbm", "percent", "phrase"),
+    [
+        (-40, None, "Excellent (-40 dBm)"),
+        (-50, None, "Excellent (-50 dBm)"),
+        (-51, None, "Good (-51 dBm)"),
+        (-60, None, "Good (-60 dBm)"),
+        (-61, None, "Fair (-61 dBm)"),
+        (-70, None, "Fair (-70 dBm)"),
+        (-71, None, "Weak (-71 dBm)"),
+        (None, 80, "Good (80%)"),
+        (None, None, "unknown (install iw to see signal)"),
+    ],
+)
+def test_wifi_signal_words(dbm, percent, phrase):
+    """dBm thresholds, then percent, then the iw hint. dBm wins when both exist."""
+    info = WifiInfo(
+        True,
+        interface="wlan0",
+        ssid="Home\x1b[2J" if dbm == -60 else "Home",
+        signal_dbm=dbm,
+        signal_percent=1 if dbm is not None else percent,
+        channel=6 if dbm == -60 else None,
+        band="2.4 GHz" if dbm == -60 else None,
+    )
+    text = format_wifi(info)
+    signal = next(line for line in text.splitlines() if line.startswith("Signal"))
+    assert signal.endswith(phrase)
+    if dbm == -60:
+        assert "\x1b" not in text and "Home?[2J" in text
+        notes = [line for line in text.splitlines() if "shorter range" in line]
+        assert len(notes) == 1
+        assert "Channel 6" in notes[0] and "2.4 GHz" in notes[0] and "5 GHz" in notes[0]
+
+
+@pytest.mark.parametrize(
+    ("ip", "gateway", "label"),
+    [
+        ("192.168.1.1", "192.168.1.1", "your router"),
+        ("1.1.1.1", "1.1.1.1", "your router"),
+        ("1.1.1.1", "192.168.1.1", "Cloudflare (public)"),
+        ("1.0.0.1", None, "Cloudflare (public)"),
+        ("8.8.8.8", None, "Google (public)"),
+        ("8.8.4.4", None, "Google (public)"),
+        ("9.9.9.9", None, "Quad9 (public)"),
+        ("127.0.0.53", "192.168.1.1", "this computer (local resolver)"),
+        ("127.0.0.1", None, "this computer (local resolver)"),
+        ("::1", None, "this computer (local resolver)"),
+        ("198.51.100.1", "192.168.1.1", "likely your internet provider"),
+    ],
+)
+def test_dns_server_labels(ip, gateway, label):
+    local = label.startswith("this computer")
+    config = DnsConfig(
+        [DnsServer(ip, "resolv.conf")],
+        source="resolv.conf",
+        uses_systemd_stub=ip == "127.0.0.53",
+        upstream=["9.9.9.9"] if local else [],
+    )
+    lookup = LookupResult("example.com\x1b", True, ("93.184.216.34",), 12.0)
+    text = format_dns(config, lookup, gateway)
+    assert "\x1b" not in text
+    row = next(line for line in text.splitlines() if ip in line.split())
+    assert label in row
+    if ip == "1.1.1.1" and gateway == "1.1.1.1":
+        assert "Cloudflare" not in text
+    lookup_lines = [line for line in text.splitlines() if line.startswith("Lookup")]
+    assert len(lookup_lines) == 1
+    assert "example.com?" in lookup_lines[0] and "93.184.216.34" in lookup_lines[0]
+    upstream = [line for line in text.splitlines() if line.startswith("Upstream")]
+    if local:
+        assert len(upstream) == 1 and "9.9.9.9" in upstream[0] and "Quad9" in upstream[0]
+    else:
+        assert upstream == []

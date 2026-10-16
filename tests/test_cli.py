@@ -10,14 +10,27 @@ import pytest
 
 from homenet import __version__
 from homenet.cli import BANNER, main
-from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
+from homenet.core import (
+    baseline,
+    checks,
+    devices,
+    dns,
+    netinfo,
+    port_notes,
+    ports,
+    router,
+    speed,
+    wifi,
+)
 from homenet.core.baseline import BaselineError, BaselineNotFoundError, diff_devices
 from homenet.core.checks import CheckResult
+from homenet.core.dns import DnsConfig, DnsServer, LookupResult
 from homenet.core.netinfo import NetInfo, NetInfoError
 from homenet.core.parser import Device, ParseError, Port
 from homenet.core.router import AdminPage, RouterCheck
 from homenet.core.runner import NmapNotFoundError, TargetNotAllowedError
 from homenet.core.speed import SpeedError, SpeedResult
+from homenet.core.wifi import WifiInfo
 from homenet.output import (
     format_device,
     format_device_json,
@@ -25,6 +38,7 @@ from homenet.output import (
     format_devices_json,
     format_diff,
     format_diff_json,
+    format_dns_json,
     format_doctor_json,
     format_error,
     format_error_json,
@@ -38,6 +52,8 @@ from homenet.output import (
     format_speed_json,
     format_whoami,
     format_whoami_json,
+    format_wifi,
+    format_wifi_json,
 )
 
 # Wording from homenet.core.checks.privilege_fix_hint for a resolved program path.
@@ -57,6 +73,8 @@ _SUBCOMMANDS = (
     "baseline",
     "new-devices",
     "speed",
+    "wifi",
+    "dns",
     "doctor",
     "explain",
 )
@@ -151,6 +169,9 @@ def test_whoami_net_error_without_a_traceback(hint, capsys, monkeypatch):
 
 def _patch_checks(monkeypatch, results: list[CheckResult]) -> None:
     monkeypatch.setattr(checks, "run_all_checks", lambda: results)
+    # These tests supply the check list. Optional Wi-Fi/DNS tools are covered
+    # on their own, so they must not call the real version commands here.
+    monkeypatch.setattr(checks, "OPTIONAL_TOOLS", ())
 
 
 @pytest.mark.parametrize(
@@ -581,6 +602,108 @@ def test_doctor_json(results, code, ok, capsys, monkeypatch):
         assert loaded["checks"][1]["severity"] == "warning"
     if any("\x1b" in result.detail for result in results):
         assert loaded["checks"][0]["detail"] == "user on eth0?"
+
+
+def _assert_no_controls(value) -> None:
+    if isinstance(value, str):
+        assert "\x1b" not in value
+    elif isinstance(value, dict):
+        for item in value.values():
+            _assert_no_controls(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_no_controls(item)
+
+
+def test_wifi_on_wsl_prints_the_note_and_exits_zero(capsys, monkeypatch):
+    info = WifiInfo(False, "WSL", wsl=True)
+    monkeypatch.setattr(wifi, "get_wifi_info", lambda **_kwargs: info)
+    assert main(["wifi"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == format_wifi(info) + "\n"
+    assert "Wi-Fi info isn't visible inside WSL" in captured.out
+    assert "Traceback" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("command", ["wifi", "dns"])
+def test_wifi_and_dns_json(command, capsys, monkeypatch):
+    info = WifiInfo(
+        True,
+        interface="wlan0",
+        ssid="Home\x1b[2J",
+        signal_dbm=-55,
+        signal_percent=90,
+        channel=36,
+        frequency_mhz=5180,
+        band="5 GHz",
+        link_speed_mbps=866.7,
+    )
+    config = DnsConfig(
+        [DnsServer("192.168.1.1\x1b", "resolvectl", "wlan0")],
+        "resolvectl",
+        False,
+        ["1.1.1.1"],
+    )
+    lookup = LookupResult("example.com", True, ("93.184.216.34",), 12.5)
+    seen: dict = {}
+
+    def get_wifi(**kwargs):
+        seen["wifi"] = kwargs
+        kwargs["on_step"]("Reading Wi-Fi link of wlan0 (iw)")
+        return info
+
+    def get_dns(**kwargs):
+        seen["dns"] = kwargs
+        kwargs["on_step"]("Asking systemd-resolved (resolvectl)")
+        return config
+
+    def lookup_test(*_args, **kwargs):
+        seen["lookup"] = kwargs
+        kwargs["on_step"]("Looking up example.com")
+        return lookup
+
+    monkeypatch.setattr(wifi, "get_wifi_info", get_wifi)
+    monkeypatch.setattr(dns, "get_dns_servers", get_dns)
+    monkeypatch.setattr(dns, "dns_lookup_test", lookup_test)
+    monkeypatch.setattr(netinfo, "detect", lambda: HOME)
+    assert main([command, "-v", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out and BANNER not in captured.out
+    loaded = json.loads(captured.out)
+    _assert_no_controls(loaded)
+    if command == "wifi":
+        assert captured.out == format_wifi_json(info) + "\n"
+        assert seen["wifi"]["on_step"] is not None and "stats_every" not in seen["wifi"]
+        assert "Reading Wi-Fi link of wlan0 (iw)" in captured.err
+        assert loaded["available"] is True and loaded["signal"]
+    else:
+        assert captured.out == format_dns_json(config, lookup, HOME.gateway) + "\n"
+        assert seen["dns"]["on_step"] is not None and "stats_every" not in seen["dns"]
+        assert seen["lookup"]["on_step"] is not None
+        assert "Looking up example.com" in captured.err
+        assert loaded["servers"][0]["ip"] == "192.168.1.1?"
+        assert loaded["lookup"]["ok"] is True
+
+
+def test_doctor_includes_optional_tool_checks(capsys, monkeypatch):
+    monkeypatch.setattr(
+        checks,
+        "run_all_checks",
+        lambda: [CheckResult("nmap", True, "nmap 7.95", severity="ok")],
+    )
+    seen: list[str] = []
+
+    def fake(name, **_kwargs):
+        seen.append(name)
+        return CheckResult(name, False, f"{name} is not installed", "sudo apt install x", "warning")
+
+    monkeypatch.setattr(checks, "check_optional_tool", fake)
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert seen == ["nmcli", "iw", "resolvectl"]
+    assert "WARN  nmcli" in out and "WARN  iw" in out and "WARN  resolvectl" in out
+    assert "No errors. 3 warnings." in out
+    assert "FAIL" not in out
 
 
 _OTHER = Device("192.168.1.50", None, None, "phone", [Port(9, "tcp", "open", "discard")])

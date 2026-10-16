@@ -7,14 +7,16 @@ import json
 import pytest
 
 from homenet.cli import BANNER, main
-from homenet.core import baseline, checks, devices, netinfo, ports, router, speed
+from homenet.core import baseline, checks, devices, dns, netinfo, ports, router, speed, wifi
 from homenet.core.checks import CheckResult
 from homenet.core.commands import Command, notify
+from homenet.core.dns import DnsConfig, DnsServer, LookupResult
 from homenet.core.netinfo import NetInfo, NetInfoError
 from homenet.core.parser import Device, Port
 from homenet.core.router import RouterCheck
 from homenet.core.runner import NmapNotFoundError
 from homenet.core.speed import SpeedResult
+from homenet.core.wifi import WifiInfo
 from homenet.output import format_devices_json
 
 HOME = NetInfo("eth0", "192.168.1.100", "192.168.1.1", "192.168.1.0/24")
@@ -29,6 +31,7 @@ HTTP = Command(
     20,
 )
 PLANNED = (EXEC, HTTP)
+_LOOKUP = LookupResult("example.com", True, ("93.184.216.34",), 10.0)
 _INVALID_HINT = "Use an IP address or subnet like 192.168.1.0/24."
 
 # command, argv, prints the safety banner, accepts --json
@@ -42,6 +45,8 @@ _SHOW = (
     ("baseline", ["baseline"], True, False),
     ("new-devices", ["new-devices"], True, True),
     ("speed", ["speed"], False, True),
+    ("wifi", ["wifi"], False, True),
+    ("dns", ["dns"], False, True),
     ("doctor", ["doctor"], False, True),
 )
 # command, extra argv, kwargs passed to planned_commands
@@ -49,6 +54,8 @@ _EXPLAIN = (
     ("whoami-net", [], {}),
     ("doctor", [], {}),
     ("speed", [], {}),
+    ("wifi", [], {}),
+    ("dns", [], {}),
     ("devices", [], {"local_network": NET}),
     ("baseline", [], {"local_network": NET}),
     ("new-devices", [], {"local_network": NET}),
@@ -89,6 +96,10 @@ def _result(command: str):
         return RouterCheck("192.168.1.1")
     if command == "speed":
         return SpeedResult(8.0, 1_000_000, 1.0, HTTP.url)
+    if command == "wifi":
+        return WifiInfo(True, interface="wlan0", ssid="Home", signal_dbm=-55)
+    if command == "dns":
+        return DnsConfig([DnsServer("192.168.1.1", "resolvectl")], "resolvectl")
     return [CheckResult("nmap", True, "nmap 7.95", severity="ok")]
 
 
@@ -123,6 +134,13 @@ def _patch_run(monkeypatch, command: str, cmd: Command) -> dict:
     if command in targets:
         mod, name = targets[command]
         monkeypatch.setattr(mod, name, run)
+    if command == "doctor":
+        monkeypatch.setattr(checks, "OPTIONAL_TOOLS", ())
+    if command == "wifi":
+        monkeypatch.setattr(wifi, "get_wifi_info", run)
+    if command == "dns":
+        monkeypatch.setattr(dns, "get_dns_servers", run)
+        monkeypatch.setattr(dns, "dns_lookup_test", lambda *_a, **_k: _LOOKUP)
     if command == "baseline":
         monkeypatch.setattr(baseline, "save_baseline", lambda *_a, **_k: "baseline.json")
     if command == "new-devices":
@@ -149,6 +167,9 @@ def no_scans(monkeypatch):
     monkeypatch.setattr(ports, "scan_services", fail)
     monkeypatch.setattr(router, "check_router_admin", fail)
     monkeypatch.setattr(speed, "measure_download", fail)
+    monkeypatch.setattr(wifi, "get_wifi_info", fail)
+    monkeypatch.setattr(dns, "get_dns_servers", fail)
+    monkeypatch.setattr(dns, "dns_lookup_test", fail)
     monkeypatch.setattr(checks, "run_all_checks", fail)
     monkeypatch.setattr(baseline, "save_baseline", fail)
     monkeypatch.setattr(baseline, "load_baseline", fail)
