@@ -253,6 +253,27 @@ def plan_speed(
     ]
 
 
+def plan_wifi(
+    iface: str | None = None,
+    *,
+    connection: str | None = None,
+    which=None,
+    listdir=None,
+    exists=None,
+) -> list[Command]:
+    from homenet.core.wifi import plan_wifi_commands
+
+    return plan_wifi_commands(
+        iface, connection=connection, which=which, listdir=listdir, exists=exists
+    )
+
+
+def plan_dns(*, which=None) -> list[Command]:
+    from homenet.core.dns import plan_dns_commands
+
+    return plan_dns_commands(which)
+
+
 _PLANNERS: dict[str, Callable[..., list[Command]]] = {
     "devices": plan_scan,
     "device": plan_scan,
@@ -264,6 +285,8 @@ _PLANNERS: dict[str, Callable[..., list[Command]]] = {
     "doctor": plan_doctor,
     "router": plan_router,
     "speed": plan_speed,
+    "wifi": plan_wifi,
+    "dns": plan_dns,
 }
 
 
@@ -289,5 +312,7 @@ __all__: Sequence[str] = (
     "plan_doctor",
     "plan_router",
     "plan_speed",
+    "plan_wifi",
+    "plan_dns",
     "planned_commands",
 )

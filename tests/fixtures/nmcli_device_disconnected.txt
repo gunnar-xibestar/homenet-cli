@@ -1,0 +1,2 @@
+GENERAL.STATE:30 (disconnected)
+GENERAL.CONNECTION:--
