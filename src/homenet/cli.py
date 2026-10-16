@@ -9,7 +9,8 @@
 ``services`` asks :func:`homenet.core.ports.scan_services` for one host.
 It does not pass ``allow_subnet``.
 ``router`` asks :func:`homenet.core.router.check_router_admin`.
-``speed`` asks :func:`homenet.core.speed.measure_download`.
+``speed`` asks :func:`homenet.core.speed.measure_download`. Unless ``--json``,
+it passes ``on_progress`` and prints that callback on stderr.
 ``wifi`` asks :func:`homenet.core.wifi.get_wifi_info`.
 ``dns`` asks :func:`homenet.core.dns.get_dns_servers` and
 :func:`homenet.core.dns.dns_lookup_test`. When
@@ -34,7 +35,15 @@ On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
 step finishes.
 ``--json`` and a non-terminal stderr leave that line off, so stdout stays
-intact. ``-v`` prints core ``on_step`` text to stderr. ``-vv`` also passes
+intact. ``speed`` is the exception: progress is still on without ``--json``.
+On a terminal it rewrites one stderr line with a carriage return, for example
+``Testing download speed... 3s of 8s, about 212 Mbps so far``, and says
+``warming up`` while megabits per second are 0. That line is cleared before
+the result or an error is printed. When stderr is not a terminal, each update
+is a plain line with no carriage return. ``--json`` does not pass
+``on_progress`` and writes no progress on stdout. There is no flag to turn
+progress off.
+``-v`` prints core ``on_step`` text to stderr. ``-vv`` also passes
 ``stats_every=5`` and relays nmap progress. Displayed text goes through
 :func:`homenet.output._clean`. ``baseline`` calls
 :func:`homenet.core.baseline.take_baseline` and ``new-devices`` calls
@@ -287,8 +296,9 @@ _COMMANDS: tuple[_Command, ...] = (
     _Command(
         "speed",
         "Check how fast your internet connection is",
-        "Measure how fast your connection to the internet is, in plain numbers, "
-        "using a short download from Cloudflare (speed.cloudflare.com).",
+        "Estimate your download speed with 4 connections to Cloudflare "
+        "(speed.cloudflare.com) over about 8 seconds. The number is an estimate, "
+        "not a full speed test.",
         "homenet speed",
         json=True,
     ),
@@ -623,12 +633,99 @@ def _run_router(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_speed(args: argparse.Namespace) -> int:
+def _clock_token(value: float) -> str:
+    """``3s`` or ``8s`` when the value is a whole number of seconds."""
+    number = float(value)
+    if number.is_integer():
+        return f"{int(number)}s"
+    text = f"{number:.3f}".rstrip("0").rstrip(".")
+    return f"{text}s"
+
+
+def _speed_progress_line(elapsed_s: float, total_s: float, mbps: float) -> str:
+    """One stderr status line. ``mbps`` 0.0 is warmup."""
+    elapsed = _clock_token(elapsed_s)
+    total = _clock_token(total_s)
+    if mbps == 0.0:
+        detail = "warming up"
+    else:
+        detail = f"about {round(mbps)} Mbps so far"
+    text = f"Testing download speed... {elapsed} of {total}, {detail}"
+    return _clean(text) or ""
+
+
+class _SpeedProgress:
+    """Live download line on stderr. Carriage return only when stderr is a TTY."""
+
+    def __init__(self) -> None:
+        self._stream = sys.stderr
+        self._lock = threading.Lock()
+        self._width = 0
+        self._tty = _stderr_is_tty()
+
+    def update(self, elapsed_s: float, total_s: float, mbps: float) -> None:
+        text = _speed_progress_line(elapsed_s, total_s, mbps)
+        if not text:
+            return
+        with self._lock:
+            if self._tty:
+                self._paint(text)
+            else:
+                self._stream.write(f"{text}\n")
+                self._stream.flush()
+
+    def _paint(self, text: str) -> None:
+        pad = " " * max(0, self._width - len(text))
+        self._stream.write(f"\r{text}{pad}")
+        self._stream.flush()
+        self._width = len(text)
+
+    def write_line(self, text: str) -> None:
+        """Clear the live line, then print ``text`` so the two do not share a row."""
+        with self._lock:
+            if self._tty and self._width:
+                blank = " " * self._width
+                self._stream.write(f"\r{blank}\r{text}\n")
+                self._width = 0
+            else:
+                self._stream.write(f"{text}\n")
+            self._stream.flush()
+
+    def clear(self) -> None:
+        """Erase the carriage-return line. Plain lines are already finished."""
+        with self._lock:
+            if self._width:
+                self._stream.write("\r" + " " * self._width + "\r")
+                self._stream.flush()
+                self._width = 0
+
+
+def _stderr_is_tty() -> bool:
     try:
-        with _activity(args, "Measuring download speed…"):
+        return bool(sys.stderr.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _run_speed(args: argparse.Namespace) -> int:
+    """Run the download. Clear the live line before the result or any error."""
+    progress = None if getattr(args, "json", False) else _SpeedProgress()
+    args._status = progress
+    failure: speed.SpeedError | None = None
+    result = None
+    try:
+        if progress is None:
             result = speed.measure_download()
+        else:
+            result = speed.measure_download(on_progress=progress.update)
     except speed.SpeedError as exc:
-        return _fail(args, exc)
+        failure = exc
+    finally:
+        if progress is not None:
+            progress.clear()
+        args._status = None
+    if failure is not None:
+        return _fail(args, failure)
     if args.json:
         _print_ok(args, format_speed_json(result))
     else:
@@ -748,10 +845,7 @@ def _spinner_enabled(args: argparse.Namespace) -> bool:
     """Progress is on by default, except for ``--json`` and a non-terminal stderr."""
     if getattr(args, "json", False):
         return False
-    try:
-        return bool(sys.stderr.isatty())
-    except (AttributeError, OSError, ValueError):
-        return False
+    return _stderr_is_tty()
 
 
 def _verbose_count(argv: Sequence[str]) -> int:

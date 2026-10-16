@@ -795,15 +795,18 @@ def _render(command, result, json_mode):
     return format_speed_json(result) if json_mode else format_speed(result)
 
 
-def _assert_call(command, calls):
+def _assert_call(command, calls, *, json_mode):
     if command in ("ports", "services"):
         assert calls["target"] == "192.168.1.1"
         assert calls["kwargs"] == {"top_ports": 100}
         assert "allow_subnet" not in calls["kwargs"]
     elif command == "router":
         assert calls["args"] == () and calls["kwargs"] == {}
-    else:
+    elif json_mode:
         assert calls == {"kwargs": {}}
+    else:
+        assert set(calls["kwargs"]) == {"on_progress"}
+        assert callable(calls["kwargs"]["on_progress"])
 
 
 @pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))
@@ -833,9 +836,7 @@ def test_command_success(command, json_mode, capsys, monkeypatch):
         assert captured.out == f"{BANNER}\n\n{rendered}\n"
     assert captured.err == ""
     assert "\x1b" not in captured.out
-    if command == "speed" and not json_mode:
-        assert "Cloudflare" in captured.out and "speed.cloudflare.com" in captured.out
-    _assert_call(command, calls)
+    _assert_call(command, calls, json_mode=json_mode)
 
 
 @pytest.mark.parametrize("json_mode", (False, True), ids=("plain", "json"))

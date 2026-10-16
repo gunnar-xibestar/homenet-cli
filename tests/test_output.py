@@ -734,22 +734,53 @@ def test_router_json_cleans_strings_and_keeps_bools():
     }
 
 
-def test_format_speed_uses_megabits():
-    result = SpeedResult(8.0, 1_000_000, 1.0, "https://speed.cloudflare.com/__down?bytes=1000000")
-    text = format_speed(result)
-    assert "Download  8.00 Mb/s" in text
-    assert "Sample    1000000 bytes" in text
-    assert "Time      1.000 seconds" in text
-    assert "not a full speed test" in text
-    assert "Cloudflare" in text
-    assert "speed.cloudflare.com" in text
-    raw = format_speed_json(SpeedResult(8.0, 1000, 0.5, "https://example.test/\x1b"))
+@pytest.mark.parametrize("n_errors", [0, 2])
+def test_format_speed_labels_an_estimate(n_errors):
+    lines = format_speed(
+        SpeedResult(
+            214.6,
+            20_000_000,
+            7.0,
+            "https://speed.cloudflare.com/__down?bytes=25000000",
+            connections=4,
+            warmup_s=1.0,
+            errors=("boom",) * n_errors,
+            wsl=True,
+        )
+    ).splitlines()
+    assert "215" in lines[0] and "estimate" in lines[0]
+    assert "4" in lines[1] and "8" in lines[1]
+    assert len(lines) == 2 + bool(n_errors)
+    if n_errors:
+        assert lines[-1].split()[0] == str(n_errors)
+
+
+def test_format_speed_json_adds_fields():
+    raw = format_speed_json(
+        SpeedResult(
+            8.0,
+            1000,
+            0.5,
+            "https://example.test/\x1b",
+            median_mbps=7.5,
+            connections=4,
+            warmup_s=1.0,
+            errors=("OSError: boom\x1b",),
+            wsl=True,
+            total_bytes=1500,
+        )
+    )
     assert "\x1b" not in raw
     assert json.loads(raw) == {
         "bytes": 1000,
+        "connections": 4,
         "download_mbps": 8.0,
+        "errors": ["OSError: boom?"],
+        "median_mbps": 7.5,
         "seconds": 0.5,
+        "total_bytes": 1500,
         "url": "https://example.test/?",
+        "warmup_s": 1.0,
     }
 
 
