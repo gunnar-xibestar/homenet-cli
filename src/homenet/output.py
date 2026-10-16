@@ -27,6 +27,10 @@ Input shapes for Net Core to match:
 * :func:`format_services` takes one device and shows ``product`` and ``version``.
 * :func:`format_router` takes one :class:`~homenet.core.router.RouterCheck`.
 * :func:`format_speed` takes one :class:`~homenet.core.speed.SpeedResult`.
+  The plain view labels megabits per second as an estimate, then one line
+  for how many connections ran and for about how long. When ``errors`` is
+  not empty, a last line counts the connections that reported an error.
+  ``wsl`` is not shown.
 * :func:`format_wifi` takes one :class:`~homenet.core.wifi.WifiInfo`.
   The signal line is words plus a number, such as ``Good (-55 dBm)``.
   Thresholds are Excellent at -50 dBm or stronger, Good at -60, Fair at -70,
@@ -125,7 +129,13 @@ that address is unknown. Every other field stays as the scan reported it.
 
 ``homenet speed --json``::
 
-    {"bytes": int, "download_mbps": number, "seconds": number, "url": str|null}
+    {"bytes": int, "connections": int, "download_mbps": number,
+     "errors": [str, ...], "median_mbps": number|null, "seconds": number,
+     "total_bytes": int, "url": str|null, "warmup_s": number}
+
+``download_mbps``, ``bytes``, ``seconds``, and ``url`` stay. The other keys
+are added. ``errors`` lists each cleaned message (an empty string when a
+message had no printable text). ``wsl`` is not a key.
 
 ``homenet wifi --json``::
 
@@ -574,26 +584,37 @@ def format_router_json(result: RouterCheck) -> str:
     return _dumps(payload)
 
 
+def _speed_estimate(result: SpeedResult) -> str:
+    """Megabits per second, labeled as an estimate."""
+    return _clean(f"about {round(result.download_mbps)} Mbps (estimate)") or ""
+
+
+def _speed_span(result: SpeedResult) -> str:
+    """How many connections ran, and about how long the test took."""
+    connections = result.connections
+    conn = "connection" if connections == 1 else "connections"
+    seconds = round(result.seconds + result.warmup_s)
+    unit = "second" if seconds == 1 else "seconds"
+    return _clean(f"Used {connections} {conn} over about {seconds} {unit}.") or ""
+
+
+def _speed_error_note(result: SpeedResult) -> str | None:
+    """A one-line count when any connection reported an error."""
+    count = len(result.errors)
+    if count <= 0:
+        return None
+    noun = "connection" if count == 1 else "connections"
+    return _clean(f"{count} {noun} reported an error.")
+
+
 def format_speed(result: SpeedResult) -> str:
-    """Plain numbers for one short download sample."""
-    rows = (
-        ("Download", f"{result.download_mbps:.2f} Mb/s"),
-        ("Sample", f"{result.bytes_read} bytes"),
-        ("Time", f"{result.seconds:.3f} seconds"),
-        ("From", "Cloudflare (speed.cloudflare.com)"),
-    )
-    return "\n".join(
-        [
-            "Internet download speed",
-            "",
-            _pairs(rows),
-            "",
-            "This is a short download from Cloudflare (speed.cloudflare.com), "
-            "not a full speed test.",
-            "Wi-Fi and other devices in your home can make this lower than your plan.",
-            "Mb/s means megabits per second, the unit internet plans use.",
-        ]
-    )
+    """Estimate line, then connections and duration. No WSL note."""
+    rows = (("Download speed", _speed_estimate(result)),)
+    lines = [_pairs(rows), _speed_span(result)]
+    note = _speed_error_note(result)
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
 
 
 def format_speed_json(result: SpeedResult) -> str:
@@ -603,6 +624,11 @@ def format_speed_json(result: SpeedResult) -> str:
         "bytes": result.bytes_read,
         "seconds": result.seconds,
         "url": _clean(result.url),
+        "median_mbps": result.median_mbps,
+        "connections": result.connections,
+        "warmup_s": result.warmup_s,
+        "errors": [_clean(item) or "" for item in result.errors],
+        "total_bytes": result.total_bytes,
     }
     return _dumps(payload)
 

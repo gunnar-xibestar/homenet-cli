@@ -1,6 +1,7 @@
 """Status line and -v/-vv. Core is mocked; nothing real runs.
 
-One case per behavior: terminal on/off, --json, -v, -vv, and the line clearing.
+One case per behavior: terminal on/off, --json, -v, -vv, the line clearing,
+and the speed progress callback (warmup, then megabits, cleared on a TTY).
 """
 
 from __future__ import annotations
@@ -13,11 +14,12 @@ import time
 import pytest
 
 from homenet.cli import BANNER, main
-from homenet.core import baseline, devices, netinfo
+from homenet.core import baseline, devices, netinfo, speed
 from homenet.core.baseline import DeviceDiff
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device
-from homenet.output import format_devices, format_devices_json
+from homenet.core.speed import SpeedResult
+from homenet.output import format_devices, format_devices_json, format_speed, format_speed_json
 
 NET = "192.168.1.0/24"
 HOME = NetInfo("eth0", "192.168.1.100", "192.168.1.1", NET)
@@ -146,3 +148,46 @@ def test_snapshot_commands_use_the_baseline_api(command, fn, monkeypatch):
     assert seen["target"] == NET
     assert seen["kwargs"]["local_network"] == NET
     assert seen["kwargs"]["resolve_names"] is True
+
+
+def test_speed_progress_shows_warmup_then_clears(monkeypatch, capsys):
+    result = SpeedResult(
+        215.2,
+        50_000_000,
+        7.0,
+        "https://speed.cloudflare.com/__down",
+        connections=4,
+        warmup_s=1.0,
+        total_bytes=60_000_000,
+    )
+    warm = "Testing download speed... 1s of 8s, warming up"
+    later = "Testing download speed... 3s of 8s, about 212 Mbps so far"
+
+    def measure(**kwargs):
+        progress = kwargs.get("on_progress")
+        if progress is not None:
+            progress(1.0, 8.0, 0.0)
+            progress(3.0, 8.0, 212.4)
+        return result
+
+    def run(argv, tty):
+        err = _Err(tty)
+        monkeypatch.setattr(sys, "stderr", err)
+        monkeypatch.setattr(speed, "measure_download", measure)
+        assert main(argv) == 0
+        return capsys.readouterr().out, err.getvalue()
+
+    out, blob = run(["speed"], True)
+    assert f"\r{warm}" in blob and f"\r{later}" in blob
+    assert "\n" not in blob and _visible_tail(blob) == ""
+    assert out == format_speed(result) + "\n"
+    assert "\r" not in out and warm not in out
+
+    out, blob = run(["speed"], False)
+    assert blob == f"{warm}\n{later}\n"
+    assert "\r" not in blob and out == format_speed(result) + "\n"
+
+    out, blob = run(["speed", "--json"], True)
+    assert blob == ""
+    assert out == format_speed_json(result) + "\n"
+    assert warm not in out and "\r" not in out

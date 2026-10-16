@@ -117,7 +117,7 @@ homenet services 192.168.1.1    # services on one device, plus program and versi
 homenet router                  # gateway, and whether its admin page answers
 homenet baseline                # save the current device list
 homenet new-devices             # what changed since that saved snapshot
-homenet speed                   # a short download sample from Cloudflare
+homenet speed                   # an estimate of download speed
 homenet wifi                    # signal, band, and channel for the Wi-Fi you are on
 homenet dns                     # DNS servers, who they belong to, and a lookup
 homenet explain devices         # show the real commands, without running them
@@ -195,6 +195,8 @@ Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `
 
 In a terminal, homenet shows a status line on stderr while a scan, sweep, HTTP check, Wi-Fi read, or DNS check runs, such as `Scanning 192.168.1.0/24… (12s)`, `Reading Wi-Fi…`, or `Checking DNS…`, and clears it when the step finishes. `--json`, and a run whose stderr is not a terminal, leave that line out so stdout stays intact.
 
+`homenet speed` uses its own line, and there is no flag to turn it off. In a terminal it updates in place, for example `Testing download speed... 3s of 8s, about 212 Mbps so far`. During warmup, while the rate is still zero, that line says `warming up`. The line is cleared before the result is printed. When stderr is not a terminal, each update is a plain line and the carriage return is left out. `--json` prints no progress line on stdout or stderr.
+
 `-v` prints each step on stderr, such as `Parsed 7 hosts`, `Resolving names…`, `Reading Wi-Fi link of wlan0 (iw)`, or `Looking up example.com`. `-vv` also shows nmap's progress every 5 seconds. The flag can go before or after the command. Wi-Fi and DNS do not print nmap progress.
 
 ### See the real command
@@ -218,9 +220,31 @@ $ nmap -sn -T4 -oX - 192.168.1.0/24
 
 `explain wifi` lists the `nmcli` and `iw` reads, and `explain dns` lists `resolvectl status` when that tool is installed. Neither runs them. `wifi` and `dns` do not take `--network`. A live `homenet dns` may also run `ip` to learn the gateway so it can label your router. That is the same lookup as `whoami-net`.
 
+`explain speed` lists one download per connection and does not run them. The default is 4:
+
+```text
+$ curl -sS --max-time 10 'https://speed.cloudflare.com/__down?bytes=25000000'
+  download 25000000 bytes to estimate speed
+```
+
+That block is repeated once per connection. `homenet speed --show-cmd` still runs the test. Before each request it prints that same curl line on stderr. A connection is requested again until the 8 seconds are up, so the line can appear more than once.
+
 ## Speed contacts Cloudflare
 
-`homenet speed` times one short HTTPS download and prints megabits per second, the number of bytes, and how long it took. The sample comes from **speed.cloudflare.com**: `https://speed.cloudflare.com/__down?bytes=1000000` (one million bytes). The command says this is a short download from Cloudflare (speed.cloudflare.com), not a full speed test. Your computer must be able to reach that host.
+`homenet speed` estimates download speed. It opens 4 connections to **speed.cloudflare.com** and downloads for about 8 seconds:
+
+`https://speed.cloudflare.com/__down?bytes=25000000`
+
+The first second is warmup and is not part of the estimate. The number is an estimate, not a full speed test. Wi-Fi and other devices in your home can make it lower than your plan. Your computer must be able to reach that host.
+
+```text
+Download speed  about 215 Mbps (estimate)
+Used 4 connections over about 8 seconds.
+```
+
+If a connection fails, one more line says how many reported an error, for example `2 connections reported an error.`
+
+`--json` keeps `download_mbps`, `bytes`, `seconds`, and `url`, and adds `median_mbps`, `connections`, `warmup_s`, `errors`, and `total_bytes`.
 
 ## Troubleshooting
 
