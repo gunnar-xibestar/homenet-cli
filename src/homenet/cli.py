@@ -27,6 +27,8 @@ and 2 when the command fails.
 on failure. ``wifi`` and ``dns`` exit 0, including when Wi-Fi is unavailable,
 inside WSL, or when the lookup does not succeed. Neither needs sudo.
 Usage errors exit 2.
+A closed stdout pipe, such as ``homenet devices | head``, exits 1 with no
+traceback.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
@@ -74,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import sys
 import threading
 import time
@@ -1433,6 +1436,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     does not matter: ``new-devices`` exits 1 when it finds changes and still
     gets the gap. ``--help``, ``--version``, and usage errors exit inside
     ``parse_args`` and never reach this step.
+
+    ``BrokenPipeError`` (a reader such as ``head`` closed the pipe) exits 1
+    with no traceback. Stdout is pointed at ``os.devnull`` first so the
+    flush the interpreter runs at shutdown does not raise it again.
     """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
     json_mode = "--json" in raw
@@ -1455,7 +1462,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             extra = tail.padding()
             if extra:
                 stdout.write(extra)
+        # A closed pipe must raise here, not while Python flushes at shutdown.
+        stdout.flush()
         return code
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output
+        # to devnull to avoid another BrokenPipeError at shutdown.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(1)
     finally:
         sys.stdout = stdout
         set_command_hook(None)
