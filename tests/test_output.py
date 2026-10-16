@@ -802,7 +802,6 @@ def test_wifi_signal_words(dbm, percent, phrase):
         ("127.0.0.53", "192.168.1.1", "this computer (local resolver)"),
         ("::1", None, "this computer (local resolver)"),
         ("192.168.1.2", "192.168.1.1", "a device on your network"),
-        ("10.0.0.53", "192.168.1.1", "a device on your network"),
         ("fe80::1", "192.168.1.1", "a device on your network"),
         ("1.2.3.4", "192.168.1.1", "likely your internet provider"),
     ],

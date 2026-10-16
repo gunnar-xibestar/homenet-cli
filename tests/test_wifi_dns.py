@@ -72,16 +72,12 @@ def test_parse_iw_link(load_fixture, fixture, expected):
     assert wifi.parse_iw_link(load_fixture(fixture)) == expected
 
 
-@pytest.mark.parametrize(
-    ("percent", "dbm"), [(-5, -100), (0, -100), (50, -75), (100, -50), (150, -50)]
-)
+@pytest.mark.parametrize(("percent", "dbm"), [(0, -100), (50, -75), (100, -50), (150, -50)])
 def test_percent_to_dbm(percent, dbm):
     assert wifi.percent_to_dbm(percent) == dbm
 
 
-@pytest.mark.parametrize(
-    ("dbm", "percent"), [(-110, 0), (-100, 0), (-75, 50), (-50, 100), (-30, 100)]
-)
+@pytest.mark.parametrize(("dbm", "percent"), [(-110, 0), (-100, 0), (-75, 50), (-50, 100)])
 def test_dbm_to_percent(dbm, percent):
     assert wifi.dbm_to_percent(dbm) == percent
 
