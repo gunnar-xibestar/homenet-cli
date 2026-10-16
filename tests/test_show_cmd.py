@@ -279,7 +279,7 @@ def test_explain(command, extra, params, json_mode, capsys, monkeypatch, no_scan
         assert loaded["commands"] == [cmd.to_dict() for cmd in PLANNED]
     else:
         blocks = [f"$ {cmd.display()}\n  {cmd.purpose}" for cmd in PLANNED]
-        assert captured.out == "\n\n".join(blocks) + "\n\n"
+        assert captured.out == "\n\n".join(blocks) + "\n" * 6
 
 
 @pytest.mark.parametrize(

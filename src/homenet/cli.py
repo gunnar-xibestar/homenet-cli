@@ -30,10 +30,11 @@ Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
-Plain stdout ends with one blank line after the command handler returns, so
-the next shell prompt has a gap above it. ``--json`` does not add that line.
-``--help``, ``--version``, and usage errors leave argparse before the handler
-and stay unchanged. Output that already ends with a blank line is left alone.
+Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after the
+command handler returns, so the next shell prompt has a gap above it.
+``--json`` does not add those lines. ``--help``, ``--version``, and usage
+errors leave argparse before the handler and stay unchanged. Output that
+already ends with that many blank lines is left alone.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -132,6 +133,8 @@ BANNER = "Only scan networks you own or have permission to scan."
 _FRAMES = ("|", "/", "-", "\\")
 _TICK = 0.1
 _STATS_EVERY = 5
+# Blank lines after plain stdout, so the next shell prompt is not flush with the last line.
+_TRAILING_BLANK_LINES = 5
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
 _VERBOSE_HELP = "Show each step on stderr. Repeat (-vv) to include nmap's progress."
 _SHOW_CMD_HELP = "Show each real command on stderr as `$ command` before it runs."
@@ -1361,12 +1364,12 @@ def _add_explain(subparsers, json_mode: bool) -> None:
 
 
 class _StdoutTail:
-    """Forward stdout and remember whether it already ends with a blank line.
+    """Forward stdout and remember how many trailing blank lines it already has.
 
     ``main`` installs this around one command handler. The handler's bytes are
     written through unchanged. Afterwards, :meth:`padding` is the newline run
-    that leaves exactly one trailing blank line, or empty when one is already
-    there.
+    that leaves :data:`_TRAILING_BLANK_LINES` trailing blank lines, or empty
+    when that many are already there.
     """
 
     def __init__(self, stream: TextIO) -> None:
@@ -1394,21 +1397,21 @@ class _StdoutTail:
             self._ending_newlines += extra
 
     def padding(self) -> str:
-        """Newlines still needed so stdout ends with one trailing blank line.
+        """Newlines still needed so stdout ends with :data:`_TRAILING_BLANK_LINES`.
 
         A blank line is a ``\\n`` after the newline that finished the last
-        line of content. ``print`` already supplies that first newline, so the
-        usual padding is one more. ``\\n\\n`` at the end, or a lone ``\\n``
-        when the handler printed nothing else, is already a trailing blank
-        line and is not extended.
+        line of content. ``print`` already supplies that first newline.
+        Output that already ends with that many blank lines, or more, is
+        left alone. When the handler printed nothing, each newline is itself
+        a blank line.
         """
-        if self._ending_newlines >= 2:
+        if self._had_content and self._ending_newlines == 0:
+            return "\n" * (1 + _TRAILING_BLANK_LINES)
+        have = self._ending_newlines - 1 if self._had_content else self._ending_newlines
+        need = _TRAILING_BLANK_LINES - have
+        if need <= 0:
             return ""
-        if self._ending_newlines == 1 and not self._had_content:
-            return ""
-        if self._ending_newlines == 1 or not self._had_content:
-            return "\n"
-        return "\n\n"
+        return "\n" * need
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._stream, name)
@@ -1417,11 +1420,11 @@ class _StdoutTail:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code.
 
-    After the command handler returns, plain text on stdout is given one
-    trailing blank line when it does not already end with one. ``--json``
-    skips that write so the document stays byte-for-byte unchanged.
-    ``--help``, ``--version``, and usage errors exit inside ``parse_args``
-    and never reach this step.
+    After the command handler returns, plain text on stdout is given
+    :data:`_TRAILING_BLANK_LINES` trailing blank lines when it does not
+    already end with that many. ``--json`` skips that write so the document
+    stays byte-for-byte unchanged. ``--help``, ``--version``, and usage
+    errors exit inside ``parse_args`` and never reach this step.
     """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
     json_mode = "--json" in raw
@@ -1438,7 +1441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _capture_commands(args)
         code = int(args.handler(args))
-        # One central gap before the next shell prompt. JSON stays untouched.
+        # _TRAILING_BLANK_LINES before the next shell prompt. JSON stays untouched.
         if not getattr(args, "json", False):
             extra = tail.padding()
             if extra:
