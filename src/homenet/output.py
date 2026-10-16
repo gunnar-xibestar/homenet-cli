@@ -832,8 +832,6 @@ def _server_label(ip: str | None, gateway: str | None) -> str:
         label = provider
     elif address is not None and (address.is_private or address.is_link_local):
         label = "a device on your network"
-    elif address is not None and address.is_global:
-        label = "likely your internet provider"
     else:
         label = "likely your internet provider"
     return _clean(label) or "likely your internet provider"
