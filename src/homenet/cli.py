@@ -30,6 +30,13 @@ Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
+Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after the
+command handler returns, so the next shell prompt has a gap above it.
+``--json`` does not add those lines. An error printed by :func:`_fail_message`
+does not either, whatever the exit code, so ``new-devices`` still gets them
+when it finds changes and exits 1. ``--help``, ``--version``, and usage
+errors leave argparse before the handler and stay unchanged. Output that
+already ends with that many blank lines is left alone.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -75,6 +82,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from typing import TextIO
 
 from homenet import __version__
 from homenet.core import (
@@ -128,6 +136,8 @@ BANNER = "Only scan networks you own or have permission to scan."
 _FRAMES = ("|", "/", "-", "\\")
 _TICK = 0.1
 _STATS_EVERY = 5
+# Blank lines after plain stdout, so the next shell prompt is not flush with the last line.
+_TRAILING_BLANK_LINES = 5
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
 _VERBOSE_HELP = "Show each step on stderr. Repeat (-vv) to include nmap's progress."
 _SHOW_CMD_HELP = "Show each real command on stderr as `$ command` before it runs."
@@ -1005,7 +1015,10 @@ def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code
 
     ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
     ``--show-cmd --json`` also includes the ``commands`` seen before the failure.
+    Sets ``args._failed`` so :func:`main` does not add trailing blank lines
+    after this error.
     """
+    args._failed = True
     if getattr(args, "json", False):
         text = format_error_json(message, hint)
         if getattr(args, "show_cmd", False):
@@ -1356,8 +1369,71 @@ def _add_explain(subparsers, json_mode: bool) -> None:
     parser.set_defaults(handler=_run_explain)
 
 
+class _StdoutTail:
+    """Forward stdout and remember how many trailing blank lines it already has.
+
+    ``main`` installs this around one command handler. The handler's bytes are
+    written through unchanged. Afterwards, :meth:`padding` is the newline run
+    that leaves :data:`_TRAILING_BLANK_LINES` trailing blank lines, or empty
+    when that many are already there.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._ending_newlines = 0
+        self._had_content = False
+
+    def write(self, text: str) -> int:
+        written = self._stream.write(text)
+        if text:
+            self._note(text)
+        return written
+
+    def _note(self, text: str) -> None:
+        if not text.endswith("\n"):
+            self._had_content = True
+            self._ending_newlines = 0
+            return
+        extra = len(text) - len(text.rstrip("\n"))
+        body = text[:-extra]
+        if body:
+            self._had_content = True
+            self._ending_newlines = extra
+        else:
+            self._ending_newlines += extra
+
+    def padding(self) -> str:
+        """Newlines still needed so stdout ends with :data:`_TRAILING_BLANK_LINES`.
+
+        A blank line is a ``\\n`` after the newline that finished the last
+        line of content. ``print`` already supplies that first newline.
+        Output that already ends with that many blank lines, or more, is
+        left alone. When the handler printed nothing, each newline is itself
+        a blank line.
+        """
+        if self._had_content and self._ending_newlines == 0:
+            return "\n" * (1 + _TRAILING_BLANK_LINES)
+        have = self._ending_newlines - 1 if self._had_content else self._ending_newlines
+        need = _TRAILING_BLANK_LINES - have
+        if need <= 0:
+            return ""
+        return "\n" * need
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI. Returns a process exit code."""
+    """Run the CLI. Returns a process exit code.
+
+    After the command handler returns, plain text on stdout is given
+    :data:`_TRAILING_BLANK_LINES` trailing blank lines when it does not
+    already end with that many. ``--json`` skips that write, and so does a
+    run that printed an error through :func:`_fail_message`. The exit code
+    does not matter: ``new-devices`` exits 1 when it finds changes and still
+    gets the gap. ``--help``, ``--version``, and usage errors exit inside
+    ``parse_args`` and never reach this step.
+    """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
     json_mode = "--json" in raw
     parser = build_parser(json_mode=json_mode)
@@ -1367,8 +1443,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.show_cmd = bool(getattr(args, "show_cmd", False) or "--show-cmd" in raw)
     # A ``-v`` before the command and another after it are both real. Count the raw argv.
     args.verbose = _verbose_count(raw)
+    stdout = sys.stdout
+    tail = _StdoutTail(stdout)
+    sys.stdout = tail
     try:
         _capture_commands(args)
-        return int(args.handler(args))
+        code = int(args.handler(args))
+        # _TRAILING_BLANK_LINES before the next shell prompt. JSON stays
+        # untouched, and so does stdout after _fail_message printed an error.
+        if not getattr(args, "_failed", False) and not getattr(args, "json", False):
+            extra = tail.padding()
+            if extra:
+                stdout.write(extra)
+        return code
     finally:
+        sys.stdout = stdout
         set_command_hook(None)

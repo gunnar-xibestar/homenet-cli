@@ -101,7 +101,7 @@ def test_devices_progress(argv, tty, mode, monkeypatch, capsys):
         assert blob == ""
         assert "on_step" not in kwargs
         return
-    assert out == f"{BANNER}\n\n{format_devices([DEVICE])}\n"
+    assert out == f"{BANNER}\n\n{format_devices([DEVICE])}" + "\n" * 6
     assert "\r" not in out
     if mode == "quiet":
         assert blob == ""
@@ -187,7 +187,7 @@ def test_speed_progress_shows_warmup_then_clears(tty, json_mode, monkeypatch, ca
         assert out == format_speed_json(result) + "\n"
         assert warm not in out and "\r" not in out
         return
-    assert out == format_speed(result) + "\n"
+    assert out == format_speed(result) + "\n" * 6
     assert "\r" not in out and warm not in out
     if tty:
         assert f"\r{warm}" in blob and f"\r{later}" in blob
