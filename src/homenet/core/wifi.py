@@ -78,12 +78,12 @@ def band_from_frequency(mhz: int | None) -> str | None:
 
 
 def parse_nmcli_fields(text: str) -> dict[str, str]:
-    """``nmcli -t`` ``KEY:value`` lines -> dict (handles ``\\:`` escapes)."""
+    """``nmcli -t`` ``KEY:value`` lines -> dict (``\\:`` and ``\\\\`` unescaped left to right)."""
     out = {}
     for line in (text or "").splitlines():
         key, sep, value = line.partition(":")
         if sep:
-            out[key.strip()] = value.replace("\\:", ":").strip()
+            out[key.strip()] = re.sub(r"\\([\\:])", r"\1", value).strip()
     return out
 
 

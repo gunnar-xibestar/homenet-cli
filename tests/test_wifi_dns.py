@@ -1,6 +1,7 @@
 """Wi-Fi and DNS core: fixture parsers, unavailable reasons, commands == planned."""
 
 import socket
+import subprocess
 import threading
 import time
 
@@ -71,17 +72,27 @@ def test_parse_iw_link(load_fixture, fixture, expected):
     assert wifi.parse_iw_link(load_fixture(fixture)) == expected
 
 
-def test_signal_conversions():
-    assert (wifi.percent_to_dbm(100), wifi.percent_to_dbm(0), wifi.percent_to_dbm(70)) == (
-        -50,
-        -100,
-        -65,
-    )
-    assert (wifi.dbm_to_percent(-52), wifi.dbm_to_percent(-30), wifi.dbm_to_percent(-110)) == (
-        96,
-        100,
-        0,
-    )
+@pytest.mark.parametrize(
+    ("percent", "dbm"), [(-5, -100), (0, -100), (50, -75), (100, -50), (150, -50)]
+)
+def test_percent_to_dbm(percent, dbm):
+    assert wifi.percent_to_dbm(percent) == dbm
+
+
+@pytest.mark.parametrize(
+    ("dbm", "percent"), [(-110, 0), (-100, 0), (-75, 50), (-50, 100), (-30, 100)]
+)
+def test_dbm_to_percent(dbm, percent):
+    assert wifi.dbm_to_percent(dbm) == percent
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("A:b\\:c", {"A": "b:c"}), ("A:x\\\\:y", {"A": "x\\:y"}), ("A:a\\\\\\:b", {"A": "a\\:b"})],
+    ids=["colon", "backslash-then-colon", "escaped-backslash-and-colon"],
+)
+def test_parse_nmcli_escapes(text, expected):
+    assert wifi.parse_nmcli_fields(text) == expected
 
 
 def test_connected_nmcli_then_iw(load_fixture):
@@ -136,14 +147,26 @@ def test_unavailable_reasons(load_fixture, kw, nmcli, iw, reason):
     assert (w.available, w.reason, w.wsl) == (False, reason, reason == "WSL")
 
 
-def test_command_errors_never_raise(load_fixture):
-    def broken(argv):
-        raise OSError("boom")
+ERRORS = [
+    OSError("boom"),
+    subprocess.CalledProcessError(1, ["x"]),
+    subprocess.TimeoutExpired(["x"], 5),
+]
 
-    assert info(broken).reason == "not connected"
-    assert wifi.get_wifi_info("--evil", which=TOOLS.get, wsl_check=lambda: False).reason == (
-        "no Wi-Fi interface"
-    )
+
+@pytest.mark.parametrize("error", ERRORS, ids=["oserror", "nonzero", "timeout"])
+@pytest.mark.parametrize("tool", ["nmcli", "iw"])
+def test_command_errors_never_raise(error, tool):
+    def broken(argv):
+        raise error
+
+    w = info(broken, which={tool: TOOLS[tool]}.get)
+    assert (w.available, w.reason) == (False, "not connected")
+
+
+def test_bad_interface_never_raises():
+    w = wifi.get_wifi_info("--evil", which=TOOLS.get, wsl_check=lambda: False)
+    assert (w.available, w.reason) == (False, "no Wi-Fi interface")
 
 
 # ---- DNS ----
