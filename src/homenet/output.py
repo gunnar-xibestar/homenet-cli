@@ -842,6 +842,9 @@ def _provider_label(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> s
     return None
 
 
+_WSL_DNS_RELAY = ipaddress.ip_address("10.255.255.254")
+
+
 def _server_label(ip: str | None, gateway: str | None) -> str:
     """Who this DNS server likely belongs to.
 
@@ -854,6 +857,8 @@ def _server_label(ip: str | None, gateway: str | None) -> str:
         label = "your router"
     elif address is not None and address.is_loopback:
         label = "this computer (local resolver)"
+    elif address == _WSL_DNS_RELAY:
+        label = "WSL's built-in DNS relay (forwards to Windows)"
     elif address is not None and (provider := _provider_label(address)):
         label = provider
     elif address is not None and (address.is_private or address.is_link_local):
