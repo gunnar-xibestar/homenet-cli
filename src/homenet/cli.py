@@ -30,12 +30,13 @@ Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
-Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after a
-command that exits 0, so the next shell prompt has a gap above it.
-``--json`` does not add those lines. A non-zero exit does not either.
-``--help``, ``--version``, and usage errors leave argparse before the handler
-and stay unchanged. Output that already ends with that many blank lines is
-left alone.
+Plain stdout ends with :data:`_TRAILING_BLANK_LINES` blank lines after the
+command handler returns, so the next shell prompt has a gap above it.
+``--json`` does not add those lines. An error printed by :func:`_fail_message`
+does not either, whatever the exit code, so ``new-devices`` still gets them
+when it finds changes and exits 1. ``--help``, ``--version``, and usage
+errors leave argparse before the handler and stay unchanged. Output that
+already ends with that many blank lines is left alone.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -1014,7 +1015,10 @@ def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code
 
     ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
     ``--show-cmd --json`` also includes the ``commands`` seen before the failure.
+    Sets ``args._failed`` so :func:`main` does not add trailing blank lines
+    after this error.
     """
+    args._failed = True
     if getattr(args, "json", False):
         text = format_error_json(message, hint)
         if getattr(args, "show_cmd", False):
@@ -1422,10 +1426,12 @@ class _StdoutTail:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code.
 
-    After a command handler returns 0, plain text on stdout is given
+    After the command handler returns, plain text on stdout is given
     :data:`_TRAILING_BLANK_LINES` trailing blank lines when it does not
-    already end with that many. ``--json`` and any non-zero exit skip that
-    write. ``--help``, ``--version``, and usage errors exit inside
+    already end with that many. ``--json`` skips that write, and so does a
+    run that printed an error through :func:`_fail_message`. The exit code
+    does not matter: ``new-devices`` exits 1 when it finds changes and still
+    gets the gap. ``--help``, ``--version``, and usage errors exit inside
     ``parse_args`` and never reach this step.
     """
     raw = list(argv) if argv is not None else list(sys.argv[1:])
@@ -1443,9 +1449,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _capture_commands(args)
         code = int(args.handler(args))
-        # _TRAILING_BLANK_LINES before the next shell prompt, and only after
-        # a successful command. JSON and error exits stay untouched.
-        if code == 0 and not getattr(args, "json", False):
+        # _TRAILING_BLANK_LINES before the next shell prompt. JSON stays
+        # untouched, and so does stdout after _fail_message printed an error.
+        if not getattr(args, "_failed", False) and not getattr(args, "json", False):
             extra = tail.padding()
             if extra:
                 stdout.write(extra)

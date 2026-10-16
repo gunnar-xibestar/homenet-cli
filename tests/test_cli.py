@@ -505,8 +505,7 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
         assert json.loads(captured.out)["has_changes"] is (code == 1)
         assert BANNER not in captured.out
     else:
-        ending = "\n" * 6 if code == 0 else "\n"
-        assert captured.out == f"{BANNER}\n\n{format_diff(report)}" + ending
+        assert captured.out == f"{BANNER}\n\n{format_diff(report)}" + "\n" * 6
 
 
 def test_whoami_json_prints_netinfo(capsys, monkeypatch):
