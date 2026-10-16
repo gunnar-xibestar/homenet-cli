@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
@@ -256,6 +258,20 @@ def _patch_lookup(monkeypatch, result):
 
     monkeypatch.setattr(devices, "get_device", get_device)
     return calls
+
+
+def test_devices_broken_pipe_exits_quietly(monkeypatch, capsys):
+    """``homenet devices | head`` exits 1 and does not print a traceback."""
+    _patch_detect(monkeypatch, HOME)
+    _patch_sweep(monkeypatch, [PHONE, LAPTOP])
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    monkeypatch.setattr(sys, "stdout", os.fdopen(write_fd, "w", encoding="utf-8"))
+    with pytest.raises(SystemExit) as caught:
+        main(["devices"])
+    assert caught.value.code == 1
+    assert capsys.readouterr().err == ""
+    assert os.readlink(f"/proc/self/fd/{write_fd}") == os.devnull
 
 
 def test_devices_prints_the_banner_and_the_sweep(capsys, monkeypatch):
