@@ -57,7 +57,7 @@ That installs an editable `homenet` plus the test tools. For everyday use of a c
 
 ## You need nmap
 
-The scan commands run nmap. `homenet doctor` also looks for the `ip` command and for ping.
+The scan commands run nmap. `homenet doctor` also looks for the `ip` command and for ping. `homenet wifi` can use `nmcli` and `iw`. `homenet dns` can use `resolvectl`. Those three are optional: doctor warns when one is missing, and the command still exits 0.
 
 ```bash
 sudo apt install nmap       # Debian, Ubuntu
@@ -65,7 +65,7 @@ sudo dnf install nmap       # Fedora
 sudo pacman -S nmap         # Arch Linux
 ```
 
-If a tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo apt install iproute2` (the `ip` command), or `sudo apt install iputils-ping`.
+If a required tool is missing, doctor prints an apt fix: `sudo apt install nmap`, `sudo apt install iproute2` (the `ip` command), or `sudo apt install iputils-ping`. A missing optional tool is a warning with its own apt fix: `network-manager` for `nmcli`, `iw` for `iw`, and `systemd-resolved` for `resolvectl`.
 
 ### Privileges
 
@@ -79,7 +79,7 @@ When doctor warns about privileges, MAC addresses and makers need a scan run wit
 sudo "$(command -v homenet)" devices
 ```
 
-The same form works for a pipx install. `doctor`, `whoami-net`, `explain`, and `speed` do not need sudo. A privileges warning still lets doctor exit 0. A missing tool or no network route is a failure and exits 1. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
+The same form works for a pipx install. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, and `dns` do not need sudo. A privileges warning still lets doctor exit 0. A missing required tool or no network route is a failure and exits 1. A missing `nmcli`, `iw`, or `resolvectl` is only a warning. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
 
 ## Quick start
 
@@ -87,7 +87,7 @@ Run these three in order, on a network you are allowed to scan.
 
 ### `homenet doctor`
 
-You should see a heading, **Home network doctor**, then five lines in this order: `nmap`, `ip`, `privileges`, `network`, and `ping`. Each line starts with `PASS`, `WARN`, or `FAIL`. A warning or failure adds a `Fix:` line when doctor knows one. When every check is fine, the last line is `All 5 checks passed.` A warning (often privileges, or a gateway that ignores ping) still exits 0. Any `FAIL` exits 1. Doctor does not need sudo. On WSL 2 NAT it can add a sixth line, `wsl`, which is also a warning.
+You should see a heading, **Home network doctor**, then `nmap`, `ip`, `privileges`, `network`, and `ping`, then the optional tools `nmcli`, `iw`, and `resolvectl`. On WSL 2 NAT a `wsl` warning is inserted before those optional tools. Each line starts with `PASS`, `WARN`, or `FAIL`. A warning or failure adds a `Fix:` line when doctor knows one. When every check is fine, including the optional tools, the last line is `All 8 checks passed.` A warning (often privileges, a gateway that ignores ping, or a missing optional tool) still exits 0. Any `FAIL` exits 1. Doctor does not need sudo. `wifi` and `dns` do not need sudo either.
 
 ### `homenet whoami-net`
 
@@ -118,6 +118,8 @@ homenet router                  # gateway, and whether its admin page answers
 homenet baseline                # save the current device list
 homenet new-devices             # what changed since that saved snapshot
 homenet speed                   # a short download sample from Cloudflare
+homenet wifi                    # signal, band, and channel for the Wi-Fi you are on
+homenet dns                     # DNS servers, who they belong to, and a lookup
 homenet explain devices         # show the real commands, without running them
 ```
 
@@ -125,17 +127,75 @@ homenet explain devices         # show the real commands, without running them
 
 `baseline` saves the device list to `$XDG_DATA_HOME/homenet/baseline.json` when that variable is an absolute path, otherwise `~/.local/share/homenet/baseline.json`. `new-devices` compares a fresh sweep with that file. If you have not saved one yet, it says to run `homenet baseline` first.
 
+### `homenet wifi`
+
+Prints the Wi-Fi name, the interface, and the signal as words plus a number, such as `Good (-55 dBm)`. Excellent is -50 dBm or stronger, Good is -60 or stronger, Fair is -70 or stronger, and anything weaker is Weak. When the radio reading is only a percent, that percent is used instead. When neither is available, the signal line says `unknown (install iw to see signal)`. One more line explains the band and channel: 2.4 GHz reaches farther, and 5 GHz is faster but has a shorter range. Link speed is shown when `iw` reports it.
+
+Inside WSL the command prints `Wi-Fi info isn't visible inside WSL` and exits 0. If this computer has no Wi-Fi, is not connected, or does not have `nmcli` or `iw`, it prints a short reason and still exits 0. `wifi` does not need sudo.
+
+```text
+Your Wi-Fi
+
+Network     Home
+Interface   wlan0
+Signal      Good (-55 dBm)
+Channel     36 (5 GHz)
+Link speed  866.7 Mb/s
+
+Channel 36 is on 5 GHz. 5 GHz is faster but has a shorter range, and 2.4 GHz reaches farther.
+```
+
+On WSL:
+
+```text
+Your Wi-Fi
+
+Wi-Fi info isn't visible inside WSL
+```
+
+### `homenet dns`
+
+Lists each DNS server and who it likely belongs to:
+
+- the gateway address is **your router**
+- a loopback address, such as `127.0.0.53`, is **this computer (local resolver)**. The upstream servers are listed too.
+- Cloudflare (`1.1.1.1`, `1.0.0.1`, `2606:4700:4700::/48`), Google (`8.8.8.8`, `8.8.4.4`, `2001:4860:4860::/48`), and Quad9 (`9.9.9.9`, `149.112.112.112`, `2620:fe::/48`) are named public resolvers
+- another private or link-local address, such as `192.168.1.2` or `fe80::1`, is **a device on your network**
+- any other public address is **likely your internet provider**
+
+The last line is a lookup of `example.com`: whether it succeeded, how long it took, and the address it found. `dns` does not need sudo. It exits 0 even when the lookup fails, so you can read the reason.
+
+```text
+DNS servers
+
+Server       Who it is
+192.168.1.1  your router
+1.1.1.1      Cloudflare (public)
+8.8.8.8      Google (public)
+
+Lookup of example.com succeeded in 18.2 ms (93.184.216.34).
+```
+
+A local resolver lists the upstream servers under the table:
+
+```text
+Server      Who it is
+127.0.0.53  this computer (local resolver)
+
+Upstream servers: 192.168.1.1 (your router), 1.1.1.1 (Cloudflare (public)).
+```
+
 ### `--json` and exit codes
 
 Every command except `baseline` takes `--json`. JSON goes to stdout, with no safety banner. Errors go to stderr as `{"error": "...", "fix_hint": "..."}`.
 
-Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `1` only when a check fails at error level. Warnings still exit `0`. `new-devices` exits `0` when nothing changed, `1` when a device is new, missing, changed, or has a different MAC address, and `2` when the command itself fails. A usage mistake, such as leaving off the IP address, exits `2`.
+Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `1` only when a check fails at error level. Warnings still exit `0`, including a missing `nmcli`, `iw`, or `resolvectl`. `wifi` and `dns` exit `0`, including when Wi-Fi is not available, inside WSL, and when the lookup fails. `new-devices` exits `0` when nothing changed, `1` when a device is new, missing, changed, or has a different MAC address, and `2` when the command itself fails. A usage mistake, such as leaving off the IP address, exits `2`.
 
 ### Progress
 
-In a terminal, homenet shows a status line on stderr while a scan, sweep, or HTTP check runs, such as `Scanning 192.168.1.0/24… (12s)`, and clears it when the step finishes. `--json`, and a run whose stderr is not a terminal, leave that line out so stdout stays intact.
+In a terminal, homenet shows a status line on stderr while a scan, sweep, HTTP check, Wi-Fi read, or DNS check runs, such as `Scanning 192.168.1.0/24… (12s)`, `Reading Wi-Fi…`, or `Checking DNS…`, and clears it when the step finishes. `--json`, and a run whose stderr is not a terminal, leave that line out so stdout stays intact.
 
-`-v` prints each step on stderr, such as `Parsed 7 hosts` and `Resolving names…`. `-vv` also shows nmap's progress every 5 seconds. The flag can go before or after the command.
+`-v` prints each step on stderr, such as `Parsed 7 hosts`, `Resolving names…`, `Reading Wi-Fi link of wlan0 (iw)`, or `Looking up example.com`. `-vv` also shows nmap's progress every 5 seconds. The flag can go before or after the command. Wi-Fi and DNS do not print nmap progress.
 
 ### See the real command
 
@@ -156,6 +216,8 @@ $ nmap -sn -T4 -oX - 192.168.1.0/24
 
 `explain devices --network 192.168.1.0/24` uses that subnet and does not run `ip`. `explain router` also takes `--gateway 192.168.1.1`. The `router` command does not take `--gateway`. Without those options, explain looks up your home network and gateway the same way a real run does, which may run the `ip` command. It is not a scan. A bad `--network` gets the usual invalid-target error and fix hint. `explain` accepts `--json`. `device`, `baseline`, and `new-devices` use the same ping sweep as `devices`.
 
+`explain wifi` lists the `nmcli` and `iw` reads, and `explain dns` lists `resolvectl status` when that tool is installed. Neither runs them. `wifi` and `dns` do not take `--network`. A live `homenet dns` may also run `ip` to learn the gateway so it can label your router. That is the same lookup as `whoami-net`.
+
 ## Speed contacts Cloudflare
 
 `homenet speed` times one short HTTPS download and prints megabits per second, the number of bytes, and how long it took. The sample comes from **speed.cloudflare.com**: `https://speed.cloudflare.com/__down?bytes=1000000` (one million bytes). The command says this is a short download from Cloudflare (speed.cloudflare.com), not a full speed test. Your computer must be able to reach that host.
@@ -164,7 +226,7 @@ $ nmap -sn -T4 -oX - 192.168.1.0/24
 
 ### Running with sudo (Debian/Ubuntu)
 
-`sudo` resets `PATH`, so plain `sudo homenet` fails with `sudo: homenet: command not found` when that command lives in a virtualenv. sudo cannot find the venv's `homenet`. `doctor`, `whoami-net`, `explain`, and `speed` do not need sudo, and `sudo homenet doctor` fails the same way.
+`sudo` resets `PATH`, so plain `sudo homenet` fails with `sudo: homenet: command not found` when that command lives in a virtualenv. sudo cannot find the venv's `homenet`. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, and `dns` do not need sudo, and `sudo homenet doctor` fails the same way.
 
 When you want MAC addresses and makers, look the program up in your own shell, before sudo starts. Doctor prints a line you can copy.
 

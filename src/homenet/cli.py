@@ -10,6 +10,11 @@
 It does not pass ``allow_subnet``.
 ``router`` asks :func:`homenet.core.router.check_router_admin`.
 ``speed`` asks :func:`homenet.core.speed.measure_download`.
+``wifi`` asks :func:`homenet.core.wifi.get_wifi_info`.
+``dns`` asks :func:`homenet.core.dns.get_dns_servers` and
+:func:`homenet.core.dns.dns_lookup_test`. When
+:func:`homenet.core.netinfo.detect` can see a gateway, a DNS server at that
+address is labeled as the router.
 The home network scans come from core. This module does not spawn commands
 or read ``/sys``. ``devices`` labels this computer from the
 :class:`~homenet.core.netinfo.NetInfo` core already collected, including ``mac``.
@@ -18,13 +23,16 @@ or read ``/sys``. ``devices`` labels this computer from the
 1 when a device is new, missing, changed, or has a different MAC address,
 and 2 when the command fails.
 ``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
-on failure. Usage errors exit 2.
+on failure. ``wifi`` and ``dns`` exit 0, including when Wi-Fi is unavailable,
+inside WSL, or when the lookup does not succeed. Neither needs sudo.
+Usage errors exit 2.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
 
-On a terminal, a scan, sweep, or HTTP check shows a status line on stderr
-(a spinner and the elapsed time) and clears it when the step finishes.
+On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
+status line on stderr (a spinner and the elapsed time) and clears it when the
+step finishes.
 ``--json`` and a non-terminal stderr leave that line off, so stdout stays
 intact. ``-v`` prints core ``on_step`` text to stderr. ``-vv`` also passes
 ``stats_every=5`` and relays nmap progress. Displayed text goes through
@@ -53,14 +61,25 @@ import ipaddress
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 
 from homenet import __version__
-from homenet.core import baseline, checks, devices, netinfo, port_notes, ports, router, speed
+from homenet.core import (
+    baseline,
+    checks,
+    devices,
+    dns,
+    netinfo,
+    port_notes,
+    ports,
+    router,
+    speed,
+    wifi,
+)
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
 from homenet.core.commands import planned_commands, set_command_hook
@@ -74,6 +93,8 @@ from homenet.output import (
     format_devices_json,
     format_diff,
     format_diff_json,
+    format_dns,
+    format_dns_json,
     format_doctor_json,
     format_error,
     format_error_json,
@@ -88,6 +109,8 @@ from homenet.output import (
     format_speed_json,
     format_whoami,
     format_whoami_json,
+    format_wifi,
+    format_wifi_json,
     merge_commands,
 )
 
@@ -175,7 +198,7 @@ _SUDO_SECTION = (
     '    sudo "$(command -v homenet)" devices\n'
     "\n"
     "  The same form works for a pipx install. doctor, whoami-net, explain,\n"
-    "  and speed do not need sudo."
+    "  speed, wifi, and dns do not need sudo."
 )
 
 
@@ -270,13 +293,39 @@ _COMMANDS: tuple[_Command, ...] = (
         json=True,
     ),
     _Command(
+        "wifi",
+        "Show the Wi-Fi signal, band, and channel",
+        "Show the Wi-Fi network this computer is using and the signal in plain words, "
+        "such as Good (-55 dBm). One line explains whether that channel is on "
+        "2.4 GHz, which reaches farther, or 5 GHz, which is faster at a shorter range.\n"
+        "\n"
+        "Inside WSL this prints a short note and still exits 0. wifi does not need sudo.",
+        "homenet wifi",
+        json=True,
+    ),
+    _Command(
+        "dns",
+        "Show DNS servers and try a lookup",
+        "List the DNS servers this computer is using, say who they likely belong to, "
+        "and look up example.com. The gateway is your router. A loopback address "
+        "is this computer's local resolver, and the servers behind it are listed too. "
+        "Cloudflare, Google, and Quad9 are named, including their IPv6 networks. "
+        "Another private or link-local address is a device on your network. "
+        "Any other public address is likely your internet provider.\n"
+        "\n"
+        "dns does not need sudo.",
+        "homenet dns",
+        json=True,
+    ),
+    _Command(
         "doctor",
         "Check that tools and permissions are ready",
         "Check that nmap, the ip command, and ping are installed, that you are allowed "
         "to scan, and that this computer has a network route. Run this first if a scan fails.\n"
         "\n"
-        "Doctor does not need sudo. A privileges warning tells you how to re-run a scan "
-        "so sudo can still find homenet.",
+        "nmcli, iw, and resolvectl are optional Wi-Fi and DNS tools. A missing one is a "
+        "warning, so doctor still exits 0. Doctor does not need sudo. A privileges warning "
+        "tells you how to re-run a scan so sudo can still find homenet.",
         "homenet doctor",
         json=True,
     ),
@@ -353,12 +402,52 @@ def _format_doctor(results: list[CheckResult]) -> str:
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
-    results = checks.run_all_checks()
+    results = list(checks.run_all_checks())
+    for name in checks.OPTIONAL_TOOLS:
+        results.append(checks.check_optional_tool(name))
     if args.json:
         _print_ok(args, format_doctor_json(results))
     else:
         print(_format_doctor(results))
     return 1 if any(_is_error(result) for result in results) else 0
+
+
+def _on_step(args: argparse.Namespace) -> Callable[[str], None] | None:
+    """Core progress text for ``-v`` and ``-vv``. None when the user did not ask."""
+    if int(getattr(args, "verbose", 0) or 0) <= 0:
+        return None
+    return lambda message: _emit_verbose(args, message)
+
+
+def _gateway() -> str | None:
+    """Gateway from core, or None when this computer has no default route."""
+    try:
+        return netinfo.detect().gateway
+    except netinfo.NetInfoError:
+        return None
+
+
+def _run_wifi(args: argparse.Namespace) -> int:
+    with _activity(args, "Reading Wi-Fi…"):
+        info = wifi.get_wifi_info(on_step=_on_step(args))
+    if args.json:
+        _print_ok(args, format_wifi_json(info))
+    else:
+        print(format_wifi(info))
+    return 0
+
+
+def _run_dns(args: argparse.Namespace) -> int:
+    step = _on_step(args)
+    with _activity(args, "Checking DNS…"):
+        gateway = _gateway()
+        config = dns.get_dns_servers(on_step=step)
+        lookup = dns.dns_lookup_test(on_step=step)
+    if args.json:
+        _print_ok(args, format_dns_json(config, lookup, gateway))
+    else:
+        print(format_dns(config, lookup, gateway))
+    return 0
 
 
 def _run_whoami(args: argparse.Namespace) -> int:
@@ -1041,6 +1130,8 @@ _HANDLERS = {
     "baseline": _run_baseline,
     "new-devices": _run_new_devices,
     "speed": _run_speed,
+    "wifi": _run_wifi,
+    "dns": _run_dns,
 }
 
 

@@ -27,6 +27,19 @@ Input shapes for Net Core to match:
 * :func:`format_services` takes one device and shows ``product`` and ``version``.
 * :func:`format_router` takes one :class:`~homenet.core.router.RouterCheck`.
 * :func:`format_speed` takes one :class:`~homenet.core.speed.SpeedResult`.
+* :func:`format_wifi` takes one :class:`~homenet.core.wifi.WifiInfo`.
+  The signal line is words plus a number, such as ``Good (-55 dBm)``.
+  Thresholds are Excellent at -50 dBm or stronger, Good at -60, Fair at -70,
+  and Weak below that. A missing dBm reading uses ``signal_percent``.
+  If both are missing, the line says to install ``iw``.
+  On WSL the plain view is the note that Wi-Fi info isn't visible inside WSL.
+* :func:`format_dns` takes a :class:`~homenet.core.dns.DnsConfig`, a
+  :class:`~homenet.core.dns.LookupResult`, and an optional gateway address.
+  Each server is labeled, in order: the gateway is ``your router``; a loopback
+  address is this computer's local resolver (upstream servers are listed too);
+  Cloudflare, Google, and Quad9 ranges (IPv4 hosts and their IPv6 networks);
+  any other private or link-local address is a device on your network; any
+  other global address is likely the internet provider. The lookup is one line.
 
 Missing device fields (``hostname``, ``mac``, ``vendor``, ``service``) are
 shown as ``unknown``. Missing network fields are shown as ``not available``.
@@ -114,8 +127,37 @@ that address is unknown. Every other field stays as the scan reported it.
 
     {"bytes": int, "download_mbps": number, "seconds": number, "url": str|null}
 
+``homenet wifi --json``::
+
+    {"available": bool, "band": str|null, "band_note": str|null,
+     "channel": int|null, "frequency_mhz": int|null, "interface": str|null,
+     "link_speed_mbps": number|null, "message": str|null, "reason": str|null,
+     "signal": str|null, "signal_dbm": int|null, "signal_percent": int|null,
+     "ssid": str|null, "wsl": bool}
+
+``signal`` is words plus a number when Wi-Fi is available, the same text as
+the plain Signal row. ``message`` is the friendly reason when it is not,
+including the WSL note. ``wifi`` exits 0 either way.
+
+``homenet dns --json``::
+
+    {"gateway": str|null,
+     "lookup": {"addresses": [str, ...], "elapsed_ms": number|null,
+                "error": str|null, "name": str|null, "ok": bool,
+                "summary": str},
+     "servers": [{"interface": str|null, "ip": str|null, "label": str,
+                  "source": str|null}, ...],
+     "source": str|null,
+     "upstream": [{"ip": str, "label": str}, ...],
+     "uses_systemd_stub": bool}
+
+``label`` is who that server likely belongs to. ``summary`` is the one-line
+lookup result. ``upstream`` is filled when a server is a local resolver.
+``dns`` exits 0.
+
 ``doctor`` ``ok`` is false only when a check failed at error severity.
-Warnings leave it true. ``new-devices`` exits 0 when ``has_changes`` is false,
+Warnings leave it true, including a missing ``nmcli``, ``iw``, or ``resolvectl``.
+``new-devices`` exits 0 when ``has_changes`` is false,
 1 when it is true, and 2 when the command fails.
 ``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
 when the command fails. No open ports, and a router with no admin page, are
@@ -146,11 +188,13 @@ from homenet.core._text import clean_text
 from homenet.core.baseline import DeviceDiff
 from homenet.core.checks import CheckResult
 from homenet.core.devices import normalize_mac
+from homenet.core.dns import DnsConfig, LookupResult
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port
 from homenet.core.port_notes import GENERIC_NOTE, PortNote
 from homenet.core.router import AdminPage, RouterCheck
 from homenet.core.speed import SpeedResult
+from homenet.core.wifi import WifiInfo, percent_to_dbm
 from homenet.core.wsl import WSL_NAT_FIX, wsl_nat_detail
 
 _UNKNOWN = "unknown"
@@ -561,6 +605,292 @@ def format_speed_json(result: SpeedResult) -> str:
         "url": _clean(result.url),
     }
     return _dumps(payload)
+
+
+_WSL_WIFI = "Wi-Fi info isn't visible inside WSL"
+_SIGNAL_UNKNOWN = "unknown (install iw to see signal)"
+# Hosts and networks, checked after the gateway and loopback. IPv4 resolvers
+# are single addresses; IPv6 resolvers are the provider's allocated range.
+_PROVIDER_NETWORKS = (
+    (ipaddress.ip_network("1.1.1.1/32"), "Cloudflare (public)"),
+    (ipaddress.ip_network("1.0.0.1/32"), "Cloudflare (public)"),
+    (ipaddress.ip_network("2606:4700:4700::/48"), "Cloudflare (public)"),
+    (ipaddress.ip_network("8.8.8.8/32"), "Google (public)"),
+    (ipaddress.ip_network("8.8.4.4/32"), "Google (public)"),
+    (ipaddress.ip_network("2001:4860:4860::/48"), "Google (public)"),
+    (ipaddress.ip_network("9.9.9.9/32"), "Quad9 (public)"),
+    (ipaddress.ip_network("149.112.112.112/32"), "Quad9 (public)"),
+    (ipaddress.ip_network("2620:fe::/48"), "Quad9 (public)"),
+)
+_WIFI_REASONS = {
+    "no Wi-Fi interface": "No Wi-Fi adapter was found on this computer.",
+    "nmcli/iw not installed": "Wi-Fi tools are not installed. Install iw to see the signal.",
+    "not connected": "This computer is not connected to Wi-Fi.",
+}
+
+
+def format_wifi(info: WifiInfo) -> str:
+    """Wi-Fi signal, channel, and a one-line explanation of the band."""
+    if not info.available:
+        message = _wifi_message(info)
+        return "\n".join(["Your Wi-Fi", "", message])
+    rows: list[tuple[str, str]] = [
+        ("Network", _text(info.ssid, _UNKNOWN)),
+        ("Interface", _text(info.interface, _UNKNOWN)),
+        ("Signal", _signal_label(info)),
+    ]
+    channel = _channel_value(info)
+    if channel:
+        rows.append(("Channel", channel))
+    if info.link_speed_mbps is not None:
+        rows.append(("Link speed", _mbps(info.link_speed_mbps)))
+    lines = ["Your Wi-Fi", "", _pairs(rows)]
+    note = _band_note(info.band, info.channel)
+    if note:
+        lines.extend(["", note])
+    return "\n".join(lines)
+
+
+def format_wifi_json(info: WifiInfo) -> str:
+    """JSON for ``homenet wifi --json``. See the module docstring."""
+    available = bool(info.available)
+    payload = {
+        "available": available,
+        "wsl": bool(info.wsl),
+        "reason": _clean(info.reason),
+        "message": None if available else _wifi_message(info),
+        "interface": _clean(info.interface),
+        "ssid": _clean(info.ssid),
+        "signal": _signal_label(info) if available else None,
+        "signal_dbm": info.signal_dbm,
+        "signal_percent": info.signal_percent,
+        "channel": info.channel,
+        "frequency_mhz": info.frequency_mhz,
+        "band": _clean(info.band),
+        "band_note": _band_note(info.band, info.channel) if available else None,
+        "link_speed_mbps": info.link_speed_mbps,
+    }
+    return _dumps(payload)
+
+
+def format_dns(config: DnsConfig, lookup: LookupResult, gateway: str | None = None) -> str:
+    """DNS servers, who they likely belong to, and one lookup line."""
+    lines = ["DNS servers", ""]
+    if not config.servers:
+        lines.append("No DNS servers were found.")
+    else:
+        rows = [
+            (_show_ip(server.ip), _server_label(server.ip, gateway)) for server in config.servers
+        ]
+        lines.append(_render_table(("Server", "Who it is"), rows))
+        upstream = _upstream_line(config, gateway)
+        if upstream:
+            lines.extend(["", upstream])
+    lines.extend(["", _lookup_line(lookup)])
+    return "\n".join(lines)
+
+
+def format_dns_json(config: DnsConfig, lookup: LookupResult, gateway: str | None = None) -> str:
+    """JSON for ``homenet dns --json``. See the module docstring."""
+    local = any(_is_loopback(server.ip) for server in config.servers)
+    payload = {
+        "gateway": _canonical(gateway),
+        "source": _clean(config.source),
+        "uses_systemd_stub": bool(config.uses_systemd_stub),
+        "servers": [
+            {
+                "ip": _canonical(server.ip) or _clean(server.ip),
+                "source": _clean(server.source),
+                "interface": _clean(server.interface),
+                "label": _server_label(server.ip, gateway),
+            }
+            for server in config.servers
+        ],
+        "upstream": _upstream_payload(config, gateway) if local else [],
+        "lookup": _lookup_payload(lookup),
+    }
+    return _dumps(payload)
+
+
+def _signal_word(dbm: int) -> str:
+    """Excellent >= -50, Good >= -60, Fair >= -70, otherwise Weak."""
+    if dbm >= -50:
+        return "Excellent"
+    if dbm >= -60:
+        return "Good"
+    if dbm >= -70:
+        return "Fair"
+    return "Weak"
+
+
+def _signal_label(info: WifiInfo) -> str:
+    """Words plus dBm, or the same words for a percent, or the iw hint."""
+    if info.signal_dbm is not None:
+        word = _signal_word(info.signal_dbm)
+        text = f"{word} ({info.signal_dbm} dBm)"
+    elif info.signal_percent is not None:
+        word = _signal_word(percent_to_dbm(info.signal_percent))
+        text = f"{word} ({info.signal_percent}%)"
+    else:
+        text = _SIGNAL_UNKNOWN
+    return _clean(text) or _SIGNAL_UNKNOWN
+
+
+def _wifi_message(info: WifiInfo) -> str:
+    if info.wsl or info.reason == "WSL":
+        return _clean(_WSL_WIFI) or _WSL_WIFI
+    mapped = _WIFI_REASONS.get(info.reason or "")
+    if mapped:
+        iface = _clean(info.interface)
+        if info.reason == "not connected" and iface:
+            mapped = f"{mapped[:-1]} on {iface}."
+        return _clean(mapped) or "Wi-Fi isn't available."
+    reason = _clean(info.reason)
+    if reason:
+        return _clean(f"Wi-Fi isn't available ({reason}).") or "Wi-Fi isn't available."
+    return "Wi-Fi isn't available."
+
+
+def _band_note(band: str | None, channel: int | None) -> str | None:
+    """One line on how far this band reaches compared with the other."""
+    name = _clean(band)
+    if name == "2.4 GHz":
+        detail = (
+            "2.4 GHz reaches farther through walls, and 5 GHz is faster but has a shorter range"
+        )
+    elif name == "5 GHz":
+        detail = "5 GHz is faster but has a shorter range, and 2.4 GHz reaches farther"
+    elif name == "6 GHz":
+        detail = "6 GHz is faster but has a shorter range, and 2.4 GHz reaches farther"
+    else:
+        return None
+    if channel is None:
+        return _clean(f"{detail}.")
+    return _clean(f"Channel {channel} is on {name}. {detail}.")
+
+
+def _channel_value(info: WifiInfo) -> str | None:
+    band = _clean(info.band)
+    if info.channel is None:
+        return band
+    if band:
+        return _clean(f"{info.channel} ({band})")
+    return _clean(str(info.channel))
+
+
+def _mbps(value: float) -> str:
+    number = f"{value:.1f}".rstrip("0").rstrip(".")
+    return _clean(f"{number} Mb/s") or _UNKNOWN
+
+
+def _address(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parsed IP, or None when the text is empty or not an address."""
+    text = _clean(value)
+    if not text:
+        return None
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        return None
+
+
+def _canonical(value: str | None) -> str | None:
+    """Printable IP text in canonical form, or None when it is not an IP."""
+    address = _address(value)
+    return None if address is None else str(address)
+
+
+def _show_ip(value: str | None) -> str:
+    return _canonical(value) or _text(value, _UNKNOWN)
+
+
+def _is_loopback(value: str | None) -> bool:
+    address = _address(value)
+    return address is not None and address.is_loopback
+
+
+def _provider_label(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    for network, label in _PROVIDER_NETWORKS:
+        if address.version == network.version and address in network:
+            return label
+    return None
+
+
+def _server_label(ip: str | None, gateway: str | None) -> str:
+    """Who this DNS server likely belongs to.
+
+    Order: gateway, loopback, provider range, private or link-local, then any
+    other global address. The gateway wins even when it is also a public resolver.
+    """
+    address = _address(ip)
+    gateway_address = _address(gateway)
+    if address is not None and address == gateway_address:
+        label = "your router"
+    elif address is not None and address.is_loopback:
+        label = "this computer (local resolver)"
+    elif address is not None and (provider := _provider_label(address)):
+        label = provider
+    elif address is not None and (address.is_private or address.is_link_local):
+        label = "a device on your network"
+    elif address is not None and address.is_global:
+        label = "likely your internet provider"
+    else:
+        label = "likely your internet provider"
+    return _clean(label) or "likely your internet provider"
+
+
+def _upstream_pairs(config: DnsConfig, gateway: str | None) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in config.upstream:
+        ip = _canonical(raw)
+        if not ip or _is_loopback(ip) or ip in seen:
+            continue
+        seen.add(ip)
+        pairs.append((ip, _server_label(ip, gateway)))
+    return pairs
+
+
+def _upstream_line(config: DnsConfig, gateway: str | None) -> str | None:
+    if not any(_is_loopback(server.ip) for server in config.servers):
+        return None
+    pairs = _upstream_pairs(config, gateway)
+    if not pairs:
+        return None
+    shown = ", ".join(f"{ip} ({label})" for ip, label in pairs)
+    return _clean(f"Upstream servers: {shown}.")
+
+
+def _upstream_payload(config: DnsConfig, gateway: str | None) -> list[dict]:
+    return [{"ip": ip, "label": label} for ip, label in _upstream_pairs(config, gateway)]
+
+
+def _lookup_line(lookup: LookupResult) -> str:
+    name = _clean(lookup.name) or "the name"
+    if lookup.elapsed_ms is None:
+        timing = ""
+    else:
+        timing = f" in {lookup.elapsed_ms:g} ms"
+    if lookup.ok:
+        addresses = [item for item in (_clean(addr) for addr in lookup.addresses) if item]
+        shown = ", ".join(addresses) if addresses else "an address"
+        text = f"Lookup of {name} succeeded{timing} ({shown})."
+    else:
+        error = _clean(lookup.error) or "it did not answer"
+        text = f"Lookup of {name} failed{timing}: {error}."
+    return _clean(text) or "Lookup failed."
+
+
+def _lookup_payload(lookup: LookupResult) -> dict:
+    addresses = [item for item in (_clean(addr) for addr in lookup.addresses) if item]
+    return {
+        "name": _clean(lookup.name),
+        "ok": bool(lookup.ok),
+        "addresses": addresses,
+        "elapsed_ms": lookup.elapsed_ms,
+        "error": _clean(lookup.error),
+        "summary": _lookup_line(lookup),
+    }
 
 
 def _host_heading(prefix: str, device: Device) -> str:
