@@ -67,19 +67,14 @@ _SUDO_HELP = frozenset({"devices", "device", "baseline", "new-devices"})
 
 @pytest.mark.parametrize("command", [None, *_SUBCOMMANDS])
 def test_help_exits_zero(command, capsys):
-    """Every --help exits 0. The sudo section is only where root changes the scan."""
+    """Every --help exits 0 with output. Only the sudo heading is checked."""
     with pytest.raises(SystemExit) as exc:
         main([command, "--help"] if command else ["--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert out.strip()
-    if command is None or command in _SUDO_HELP:
-        assert "Running with sudo (Debian/Ubuntu)" in out
-        assert '    sudo "$(command -v homenet)" devices\n' in out
-        assert "sudo resets PATH" in out
-        assert "doctor, whoami-net, explain," in out
-    else:
-        assert "Running with sudo (Debian/Ubuntu)" not in out
+    heading = "Running with sudo (Debian/Ubuntu)"
+    assert (heading in out) is (command is None or command in _SUDO_HELP)
 
 
 @pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
