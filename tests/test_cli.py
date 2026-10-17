@@ -152,7 +152,7 @@ def test_whoami_net_prints_core_netinfo(capsys, monkeypatch):
     _patch_detect(monkeypatch, info)
     assert main(["whoami-net"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == format_whoami(info) + "\n" + "·\n" * 5
+    assert captured.out == "·\n" * 2 + format_whoami(info) + "\n" + "·\n" * 5
     assert captured.err == ""
     assert "not implemented" not in captured.out
 
@@ -281,7 +281,9 @@ def test_devices_prints_the_banner_and_the_sweep(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert calls["target"] == "192.168.1.0/24"
     assert calls["kwargs"] == {"local_network": "192.168.1.0/24", "resolve_names": True}
-    assert captured.out == f"{BANNER}\n\n{format_devices([PHONE, LAPTOP])}" + "\n" + "·\n" * 5
+    assert captured.out == (
+        "·\n" * 2 + f"{BANNER}\n\n{format_devices([PHONE, LAPTOP])}" + "\n" + "·\n" * 5
+    )
     assert captured.err == ""
     assert "not implemented" not in captured.out
 
@@ -406,7 +408,7 @@ def test_device_looks_up_one_address(capsys, monkeypatch):
     assert calls["ip"] == "192.168.1.10"
     assert calls["mac"] is None
     assert calls["kwargs"] == {"local_network": "192.168.1.0/24", "resolve_names": True}
-    assert captured.out == f"{BANNER}\n\n{format_device(LAPTOP)}" + "\n" + "·\n" * 5
+    assert captured.out == "·\n" * 2 + f"{BANNER}\n\n{format_device(LAPTOP)}" + "\n" + "·\n" * 5
     assert captured.err == ""
 
 
@@ -511,7 +513,7 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
             assert err["fix_hint"]
         else:
             assert captured.err == ""
-            assert captured.out.startswith(BANNER + "\n")
+            assert captured.out.startswith("·\n" * 2 + BANNER + "\n")
             assert "Fix:" in captured.out
         return
     report = diff_devices([LAPTOP], current)
@@ -521,7 +523,7 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
         assert json.loads(captured.out)["has_changes"] is (code == 1)
         assert BANNER not in captured.out
     else:
-        assert captured.out == f"{BANNER}\n\n{format_diff(report)}" + "\n" + "·\n" * 5
+        assert captured.out == "·\n" * 2 + f"{BANNER}\n\n{format_diff(report)}" + "\n" + "·\n" * 5
 
 
 def test_whoami_json_prints_netinfo(capsys, monkeypatch):
@@ -635,7 +637,7 @@ def test_wifi_on_wsl_exits_zero(capsys, monkeypatch):
     info = WifiInfo(False, "WSL", wsl=True)
     monkeypatch.setattr(wifi, "get_wifi_info", lambda **_kwargs: info)
     assert main(["wifi"]) == 0
-    assert capsys.readouterr().out == format_wifi(info) + "\n" + "·\n" * 5
+    assert capsys.readouterr().out == "·\n" * 2 + format_wifi(info) + "\n" + "·\n" * 5
 
 
 def _wifi_json_ok(loaded: dict, seen: dict) -> None:
@@ -850,10 +852,10 @@ def test_command_success(command, json_mode, capsys, monkeypatch):
         assert captured.out == rendered + "\n"
         assert BANNER not in captured.out
     elif command == "speed":
-        assert captured.out == rendered + "\n" + "·\n" * 5
+        assert captured.out == "·\n" * 2 + rendered + "\n" + "·\n" * 5
         assert BANNER not in captured.out
     else:
-        assert captured.out == f"{BANNER}\n\n{rendered}" + "\n" + "·\n" * 5
+        assert captured.out == "·\n" * 2 + f"{BANNER}\n\n{rendered}" + "\n" + "·\n" * 5
     assert captured.err == ""
     assert "\x1b" not in captured.out
     _assert_call(command, calls, json_mode=json_mode)
@@ -880,7 +882,7 @@ def test_quiet_result_still_succeeds(command, phrase, json_mode, capsys, monkeyp
         assert captured.out == rendered + "\n"
         assert BANNER not in captured.out
     else:
-        assert captured.out == f"{BANNER}\n\n{rendered}" + "\n" + "·\n" * 5
+        assert captured.out == "·\n" * 2 + f"{BANNER}\n\n{rendered}" + "\n" + "·\n" * 5
         assert phrase in captured.out
 
 

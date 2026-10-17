@@ -279,7 +279,7 @@ def test_explain(command, extra, params, json_mode, capsys, monkeypatch, no_scan
         assert loaded["commands"] == [cmd.to_dict() for cmd in PLANNED]
     else:
         blocks = [f"$ {cmd.display()}\n  {cmd.purpose}" for cmd in PLANNED]
-        assert captured.out == "\n\n".join(blocks) + "\n" + "·\n" * 5
+        assert captured.out == "·\n" * 2 + "\n\n".join(blocks) + "\n" + "·\n" * 5
 
 
 @pytest.mark.parametrize(
@@ -328,7 +328,12 @@ def test_explain_cleans_displayed_commands(capsys, monkeypatch, no_scans):
     monkeypatch.setattr("homenet.cli.planned_commands", lambda *_a, **_k: [nasty])
     assert main(["explain", "speed"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("$ ") and "\x1b" not in out and "?" in out and "find? devices" in out
+    assert (
+        out.startswith("·\n" * 2 + "$ ")
+        and "\x1b" not in out
+        and "?" in out
+        and "find? devices" in out
+    )
     assert main(["explain", "doctor", "--json"]) == 0
     item = json.loads(capsys.readouterr().out)["commands"][0]
     assert "\x1b" not in item["display"] and "\x1b" not in item["purpose"]
@@ -417,7 +422,7 @@ def test_explain_bad_address_matches_the_real_command(argv, json_mode, capsys, n
         assert explained.out == "" and explained.err == real.err
         assert set(json.loads(explained.err)) == {"error", "fix_hint"}
     else:
-        assert real.out == f"{BANNER}\n\n{explained.out}"
+        assert real.out == "·\n" * 2 + f"{BANNER}\n\n{explained.out}"
         assert "Fix:" in explained.out and BANNER not in explained.out
 
 
