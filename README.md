@@ -79,7 +79,7 @@ When doctor warns about privileges, MAC addresses and makers need a scan run wit
 sudo "$(command -v homenet)" devices
 ```
 
-The same form works for a pipx install. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, and `dns` do not need sudo. A privileges warning still lets doctor exit 0. A missing required tool or no network route is a failure and exits 1. A missing `nmcli`, `iw`, or `resolvectl` is only a warning. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
+The same form works for a pipx install. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, `dns`, and `uninstall` do not need sudo. A privileges warning still lets doctor exit 0. A missing required tool or no network route is a failure and exits 1. A missing `nmcli`, `iw`, or `resolvectl` is only a warning. On WSL 2's virtual network, doctor adds a `wsl` warning and still exits 0.
 
 ## Quick start
 
@@ -120,12 +120,28 @@ homenet new-devices             # what changed since that saved snapshot
 homenet speed                   # an estimate of download speed
 homenet wifi                    # signal, band, and channel for the Wi-Fi you are on
 homenet dns                     # DNS servers, who they belong to, and a lookup
+homenet uninstall               # remove homenet; saved data stays unless --purge
 homenet explain devices         # show the real commands, without running them
 ```
 
 `device` prints the name, IP address, MAC address, and maker, then a Ports section. It uses the same ping sweep as `devices` (`-sn`), which does not scan ports, so that section says `No ports were reported for this device.` `ports` checks the top 100 TCP ports on one address and labels each open port low, medium, or high risk. `services` names the program and version on one address when it can. `router` asks the gateway on ports 80, 443, and 8080 and only requests the page. No open ports, and a router with no admin page, are still a successful run.
 
 `baseline` saves the device list to `$XDG_DATA_HOME/homenet/baseline.json` when that variable is an absolute path, otherwise `~/.local/share/homenet/baseline.json`. `new-devices` compares a fresh sweep with that file. If you have not saved one yet, it says to run `homenet baseline` first.
+
+### `homenet uninstall`
+
+Removes this copy of homenet. It asks `Uninstall homenet? [y/N]` and the default is no. `--yes` skips the question. If this is not an interactive terminal and you did not pass `--yes`, homenet stops and tells you to add `--yes`, instead of waiting for an answer that will never come.
+
+What it runs depends on how homenet was installed. It prints that command before it runs it:
+
+- a virtual environment or a user-site install (`pip install` or `pip install --user`): `python -m pip uninstall -y homenet-cli`, using this program's Python
+- pipx: `pipx uninstall homenet-cli`
+
+`--show-cmd` still prints the `$` line when the command actually runs. `homenet explain uninstall` prints the command and its purpose without running it. `--json` prints the result with no question on stdout. Add `--yes` for a script. `--show-cmd --json` adds the `commands` list, the same way as the other commands.
+
+The saved device snapshot stays put. homenet prints where it lives (`$XDG_DATA_HOME/homenet/baseline.json`, or `~/.local/share/homenet/baseline.json`) and says it was kept. `--purge` lists that file and its folder first, then deletes them after the same yes. Answering no runs nothing and deletes nothing.
+
+A system package (apt), an editable checkout, or an install homenet does not recognize is not removed. homenet prints the command to run yourself, such as `sudo apt remove python3-homenet-cli` or `python -m pip uninstall homenet-cli` from the source checkout, and exits 1. Nothing is run for those. `uninstall` does not need sudo.
 
 ### `homenet wifi`
 
@@ -189,7 +205,7 @@ Upstream servers: 192.168.1.1 (your router), 1.1.1.1 (Cloudflare (public)).
 
 Every command except `baseline` takes `--json`. JSON goes to stdout, with no safety banner. Errors go to stderr as `{"error": "...", "fix_hint": "..."}`.
 
-Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `1` only when a check fails at error level. Warnings still exit `0`, including a missing `nmcli`, `iw`, or `resolvectl`. `wifi` and `dns` exit `0`, including when Wi-Fi is not available, inside WSL, and when the lookup fails. `new-devices` exits `0` when nothing changed, `1` when a device is new, missing, changed, or has a different MAC address, and `2` when the command itself fails. A usage mistake, such as leaving off the IP address, exits `2`.
+Exit `0` means the command succeeded. Exit `1` means it failed. `doctor` exits `1` only when a check fails at error level. Warnings still exit `0`, including a missing `nmcli`, `iw`, or `resolvectl`. `wifi` and `dns` exit `0`, including when Wi-Fi is not available, inside WSL, and when the lookup fails. `new-devices` exits `0` when nothing changed, `1` when a device is new, missing, changed, or has a different MAC address, and `2` when the command itself fails. `uninstall` exits `0` when it removes homenet or when the answer is no, and `1` when it refuses or the uninstall fails. A usage mistake, such as leaving off the IP address, exits `2`.
 
 ### Progress
 
@@ -250,7 +266,7 @@ If a connection fails, one more line says how many reported an error, for exampl
 
 ### Running with sudo (Debian/Ubuntu)
 
-`sudo` resets `PATH`, so plain `sudo homenet` fails with `sudo: homenet: command not found` when that command lives in a virtualenv. sudo cannot find the venv's `homenet`. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, and `dns` do not need sudo, and `sudo homenet doctor` fails the same way.
+`sudo` resets `PATH`, so plain `sudo homenet` fails with `sudo: homenet: command not found` when that command lives in a virtualenv. sudo cannot find the venv's `homenet`. `doctor`, `whoami-net`, `explain`, `speed`, `wifi`, `dns`, and `uninstall` do not need sudo, and `sudo homenet doctor` fails the same way.
 
 When you want MAC addresses and makers, look the program up in your own shell, before sudo starts. Doctor prints a line you can copy.
 
