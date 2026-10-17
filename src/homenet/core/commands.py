@@ -281,6 +281,13 @@ def plan_dns(*, which=None) -> list[Command]:
     return plan_dns_commands(which)
 
 
+def plan_uninstall() -> list[Command]:
+    """The pip or pipx uninstall for this install. Raises if nothing may run."""
+    from homenet.core.selfinstall import plan_uninstall as _plan_uninstall
+
+    return _plan_uninstall()
+
+
 _PLANNERS: dict[str, Callable[..., list[Command]]] = {
     "devices": plan_scan,
     "device": plan_scan,
@@ -294,6 +301,7 @@ _PLANNERS: dict[str, Callable[..., list[Command]]] = {
     "speed": plan_speed,
     "wifi": plan_wifi,
     "dns": plan_dns,
+    "uninstall": plan_uninstall,
 }
 
 
@@ -321,5 +329,6 @@ __all__: Sequence[str] = (
     "plan_speed",
     "plan_wifi",
     "plan_dns",
+    "plan_uninstall",
     "planned_commands",
 )

@@ -78,6 +78,7 @@ _SUBCOMMANDS = (
     "wifi",
     "dns",
     "doctor",
+    "uninstall",
     "explain",
 )
 
