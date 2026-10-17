@@ -4,11 +4,16 @@ Uses :class:`~homenet.core.commands.Command` and :func:`~homenet.core.commands.r
 so the command hook sees the real argv. Never prints and never calls ``sys.exit``.
 Saved data is the baseline path from :mod:`homenet.core.baseline`.
 
-``--purge`` may delete only two kinds of path:
+``--purge`` may delete only two kinds of path, and only when that is safe:
 
-* the homenet data directory (``$XDG_DATA_HOME/homenet`` when that variable is
-  an absolute path, otherwise ``~/.local/share/homenet``)
-* source checkouts under the home directory
+* ``baseline.json`` inside the homenet data directory (``$XDG_DATA_HOME/homenet``
+  when that variable is an absolute path, otherwise ``~/.local/share/homenet``).
+  The directory itself is removed only when that leaves it empty. Any other
+  name is kept and reported.
+* a source checkout under the home directory, and only when it is a pristine
+  git repository: a real ``.git`` directory, no command-running git config,
+  no mount inside the tree, no stash, no local or ignored or untracked files,
+  and no unpushed commits on a configured upstream.
 
 A checkout is a directory named exactly ``homenet-cli`` whose ``pyproject.toml``
 has project name ``homenet-cli``. The search is :func:`os.walk` with
@@ -22,7 +27,8 @@ is not walked into.
 A path is deleted only when :func:`os.path.realpath` of it is strictly inside
 :func:`os.path.realpath` of ``HOME``. ``/``, the home directory itself, and
 anything outside home are refused. When ``HOME`` is unset or empty, nothing
-is deleted.
+is deleted. Git config is read before ``git`` runs. A setting that can run a
+command refuses that checkout, and ``git`` is not started for it.
 """
 
 from __future__ import annotations
@@ -30,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import site
 import stat
 import subprocess  # noqa: S404 - TimeoutExpired only; the process is run_command
@@ -47,7 +52,6 @@ from homenet.core.baseline import BASELINE_FILENAME, data_dir, default_baseline_
 from homenet.core.commands import Command, run_command
 
 DIST_NAME = "homenet-cli"
-APT_PACKAGE = "python3-homenet-cli"
 UNINSTALL_TIMEOUT = 120.0
 GIT_TIMEOUT = 10.0
 # Home is depth 0. ~/a/b/c/d/e/homenet-cli is depth 6 and is included.
@@ -69,6 +73,16 @@ SKIP_DIR_NAMES = frozenset(
 HOME_UNSET_MESSAGE = (
     "HOME is unset or empty, so homenet did not delete any files. "
     "Set HOME to your home folder if you still want saved data removed."
+)
+# Names homenet itself writes. Anything else in the data directory is kept.
+DATA_FILE_NAMES = frozenset({BASELINE_FILENAME})
+_CONFIG_READ_LIMIT = 1024 * 1024
+_DANGEROUS_CORE = frozenset({"fsmonitor", "hookspath", "sshcommand", "pager", "editor"})
+_GIT_CONFIG_ARGS = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
 )
 
 KIND_VENV = "venv"
@@ -181,10 +195,13 @@ def _in_pipx(prefix: Path, environ: Mapping[str, str]) -> bool:
         roots.append(Path(raw).expanduser())
     roots.append(Path.home() / ".local" / "pipx")
     for root in roots:
-        if _within(prefix, root / "venvs"):
+        venvs = root / "venvs"
+        # The prefix is the venv root, a direct child of pipx's venvs directory.
+        if prefix.parent == venvs and _within(prefix, venvs):
             return True
-    parts = prefix.parts
-    return "pipx" in parts and "venvs" in parts
+    # Same layout outside the default home: <dir>/pipx/venvs/<name>, and nothing looser.
+    parent = prefix.parent
+    return parent.name == "venvs" and parent.parent.name == "pipx"
 
 
 def _user_site() -> Path | None:
@@ -220,7 +237,6 @@ def _pip_command(executable: str, dist_name: str, kind: str) -> Command:
 
 def _manual(kind: str, dist_name: str, source: str | None) -> tuple[str, str]:
     pip = f"`python -m pip uninstall {dist_name}`"
-    apt = f"`sudo apt remove {APT_PACKAGE}`"
     root_pip = f"`sudo python -m pip uninstall {dist_name}`"
     if kind == KIND_EDITABLE:
         where = f" at {source}" if source else ""
@@ -231,11 +247,13 @@ def _manual(kind: str, dist_name: str, source: str | None) -> tuple[str, str]:
     if kind == KIND_SYSTEM:
         return (
             "This copy of homenet was installed for the whole system, so it was not removed.",
-            f"If apt installed it, run {apt}. If root pip installed it, run {root_pip}.",
+            "It was installed by your system package manager. Remove it with that tool. "
+            f"If root pip installed it, run {root_pip}.",
         )
     return (
         "homenet could not tell how this copy was installed, so it was not removed.",
-        f"From the environment that installed it, run {pip}. If apt installed it, try {apt}.",
+        f"From the environment that installed it, run {pip}. "
+        "If a system package manager installed it, remove it with that tool.",
     )
 
 
@@ -322,10 +340,33 @@ def saved_data_paths(
 
 @dataclass(frozen=True)
 class SourceCheckout:
-    """A source checkout that passed the containment checks."""
+    """A source checkout under the home directory.
+
+    ``reason`` is set when the checkout must be kept. ``identity`` is the
+    ``st_dev, st_ino`` pair captured when it was safe to consider deleting.
+    """
 
     path: Path
-    warnings: tuple[str, ...]
+    reason: str | None = None
+    identity: tuple[int, int] | None = None
+
+    @property
+    def deletable(self) -> bool:
+        return self.reason is None and self.identity is not None
+
+
+@dataclass(frozen=True)
+class DataRemoval:
+    """What a data-directory purge actually did.
+
+    ``left`` is the names still in the directory. The directory itself is
+    removed only when ``left`` is empty.
+    """
+
+    removed: tuple[Path, ...]
+    left: tuple[str, ...]
+    directory: Path
+    directory_removed: bool
 
 
 @dataclass(frozen=True)
@@ -333,10 +374,12 @@ class PurgePlan:
     """What ``--purge`` may delete. Paths already passed the containment checks.
 
     ``blocked`` is set when nothing may be deleted, which is when ``HOME`` is
-    unset or empty. ``data_dir`` is the homenet data directory, or None when
-    that directory is missing or not safe. ``baseline`` is the snapshot file
-    inside it when that file is a real file. ``checkouts`` are source
-    directories under the home directory.
+    unset or empty. ``data_dir`` is the homenet data directory when it is safe
+    to modify, or None. ``baseline`` is ``baseline.json`` when that file will
+    be deleted. ``data_left`` is every other name in the directory. The
+    directory is removed only when ``remove_data_directory`` is true.
+    ``checkouts`` includes both pristine checkouts and ones that are kept,
+    with a reason.
     """
 
     home: Path | None
@@ -344,6 +387,9 @@ class PurgePlan:
     baseline: Path | None
     checkouts: tuple[SourceCheckout, ...]
     blocked: str | None = None
+    data_left: tuple[str, ...] = ()
+    remove_data_directory: bool = False
+    data_identity: tuple[int, int] | None = None
 
 
 def _home_from_env(environ: Mapping[str, str], home: Path | None) -> Path | None:
@@ -551,53 +597,301 @@ def find_source_checkouts(home: Path) -> tuple[Path, ...]:
     return tuple(found)
 
 
-def _has_git_dir(path: Path) -> bool:
+def _keep(reason: str) -> str:
+    """Why a checkout stays on disk. The user deletes it if they still want to."""
+    return f"{reason}; delete it yourself"
+
+
+def _dir_identity(path: Path) -> tuple[int, int] | None:
     try:
-        os.lstat(path / ".git")
+        info = os.lstat(path)
     except OSError:
-        return False
-    return True
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    return (info.st_dev, info.st_ino)
 
 
 class _GitUnavailable(Exception):
     """``git`` is not installed."""
 
 
+def _git_env() -> dict[str, str]:
+    """Environment for git: no system or global config, and no inherited ``GIT_*``."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 def _git(
     checkout: Path, args: tuple[str, ...], purpose: str
 ) -> subprocess.CompletedProcess[str] | None:
-    """Run git in ``checkout``. None means the command failed. Missing git raises."""
-    command = Command(("git", "-C", os.fspath(checkout), *args), purpose)
+    """Run git in ``checkout``. None means the command failed. Missing git raises.
+
+    ``-c`` turns off fsmonitor and hooks for this process. Callers refuse a
+    repository config that can run a command before they get here.
+    """
+    command = Command(("git", *_GIT_CONFIG_ARGS, "-C", os.fspath(checkout), *args), purpose)
     try:
-        return run_command(command, GIT_TIMEOUT)
+        return run_command(command, GIT_TIMEOUT, env=_git_env())
     except FileNotFoundError as exc:
         raise _GitUnavailable from exc
     except (subprocess.TimeoutExpired, PermissionError, OSError):
         return None
 
 
-def _positive_count(text: str) -> bool:
-    value = text.strip()
-    return value.isdigit() and int(value) > 0
+def _strip_config_comment(line: str) -> str:
+    """Drop ``#`` and ``;`` comments that sit outside quotes."""
+    quote = ""
+    kept: list[str] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            kept.append(char)
+            if char == "\\" and index + 1 < len(line):
+                kept.append(line[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            kept.append(char)
+            index += 1
+            continue
+        if char in "#;":
+            break
+        kept.append(char)
+        index += 1
+    return "".join(kept)
 
 
-def _checkout_warnings(path: Path) -> tuple[str, ...]:
-    """Uncommitted or unpushed work. Empty when git is missing or the tree is clean."""
-    if not _has_git_dir(path):
-        return ()
-    warnings: list[str] = []
+def _section_name(header: str) -> str:
+    parts = header.split()
+    if not parts:
+        return ""
+    return parts[0].strip("\"'").lower()
+
+
+def _assignment_key(line: str) -> str:
+    key = line.split("=", 1)[0].strip().split()
+    if not key:
+        return ""
+    return key[0].strip("\"'").lower()
+
+
+def _assignment_is_dangerous(section: str, line: str) -> bool:
+    """True for a git option that can run a command, including ``include``."""
+    key = _assignment_key(line)
+    if not key:
+        return False
+    # include and includeIf can load another file. That file is not read here.
+    if section in {"include", "includeif"} or section == "alias" or section == "filter":
+        return True
+    if section == "core" and key in _DANGEROUS_CORE:
+        return True
+    return section == "diff" and key in {"textconv", "command"}
+
+
+def _config_is_dangerous(text: str) -> bool:
+    """True when ``text`` sets a git option that can run a command.
+
+    A continued line (a trailing backslash) is refused instead of parsed wrong.
+    """
+    section = ""
+    for raw in text.splitlines():
+        body = raw.lstrip()
+        if raw.rstrip().endswith("\\") and body[:1] not in {"#", ";", ""}:
+            return True
+        line = _strip_config_comment(raw).strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            end = line.find("]")
+            if end < 0:
+                return True
+            section = _section_name(line[1:end])
+            rest = line[end + 1 :].strip()
+            if rest and _assignment_is_dangerous(section, rest):
+                return True
+            continue
+        if _assignment_is_dangerous(section, line):
+            return True
+    return False
+
+
+def _read_nofollow(path: Path) -> tuple[bool, str] | None:
+    """``(False, "")`` when missing, ``(True, text)`` when read, None when unsafe.
+
+    Symlinks are not followed. None means the checkout must be kept.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return (False, "")
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_size > _CONFIG_READ_LIMIT or not hasattr(os, "O_NOFOLLOW"):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        data = os.read(fd, _CONFIG_READ_LIMIT + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > _CONFIG_READ_LIMIT:
+        return None
+    return (True, data.decode("utf-8", "replace"))
+
+
+def _config_can_run_command(checkout: Path) -> bool:
+    """True when ``.git/config`` must keep the checkout from running git."""
+    found = _read_nofollow(checkout / ".git" / "config")
+    if found is None:
+        return True
+    present, text = found
+    if not present:
+        return False
+    return _config_is_dangerous(text)
+
+
+def _packed_has_stash(text: str) -> bool:
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("^"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "refs/stash":
+            return True
+    return False
+
+
+def _stash_on_disk(checkout: Path) -> str | None:
+    """A stash recorded in ``refs/stash`` or ``packed-refs``, without running git."""
+    ref = _read_nofollow(checkout / ".git" / "refs" / "stash")
+    if ref is None:
+        return _keep("could not be checked")
+    if ref[0]:
+        return _keep("has a stash")
+    packed = _read_nofollow(checkout / ".git" / "packed-refs")
+    if packed is None:
+        return _keep("could not be checked")
+    if packed[0] and _packed_has_stash(packed[1]):
+        return _keep("has a stash")
+    return None
+
+
+def _git_dir_reason(checkout: Path) -> str | None:
+    """Refuse a missing, linked, or file ``.git`` before git can follow it."""
+    git_dir = checkout / ".git"
+    try:
+        info = os.lstat(git_dir)
+    except FileNotFoundError:
+        return _keep("is not a git repository")
+    except OSError:
+        return _keep("could not be checked")
+    if stat.S_ISLNK(info.st_mode):
+        return _keep("has a linked git directory")
+    if not stat.S_ISDIR(info.st_mode):
+        return _keep("has a gitdir pointer")
+    return None
+
+
+def _has_foreign_device(path: Path) -> bool:
+    """True when ``path`` or anything under it (not through a symlink) is another device.
+
+    A checkout whose own ``st_dev`` differs from its parent is a mount point.
+    """
+    try:
+        root_info = os.lstat(path)
+        parent_info = os.lstat(path.parent)
+    except OSError:
+        return True
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        return True
+    if root_info.st_dev != parent_info.st_dev:
+        return True
+    root_dev = root_info.st_dev
+    for dirpath, dirnames, filenames in os.walk(path, topdown=True, followlinks=False):
+        current = Path(dirpath)
+        try:
+            if os.lstat(current).st_dev != root_dev:
+                return True
+        except OSError:
+            return True
+        kept: list[str] = []
+        for name in dirnames:
+            try:
+                info = os.lstat(current / name)
+            except OSError:
+                return True
+            if info.st_dev != root_dev:
+                return True
+            if not stat.S_ISLNK(info.st_mode):
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            try:
+                info = os.lstat(current / name)
+            except OSError:
+                return True
+            if info.st_dev != root_dev:
+                return True
+    return False
+
+
+def _status_reason(text: str) -> str | None:
+    """Refuse any porcelain line, including ignored and untracked files."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    for line in lines:
+        if line[:2] not in {"??", "!!"}:
+            return _keep("has uncommitted changes")
+    return _keep("has untracked files")
+
+
+def _checkout_reason(path: Path) -> str | None:
+    """Why ``path`` must be kept. None means it is a pristine git checkout.
+
+    Git is not started when the repository config can run a command, when
+    ``.git`` is a file or a symlink, or when a stash ref is already on disk.
+    """
+    reason = _git_dir_reason(path)
+    if reason:
+        return reason
+    if _has_foreign_device(path):
+        return _keep("has a mount inside it")
+    if _config_can_run_command(path):
+        return _keep("has custom git config")
+    reason = _stash_on_disk(path)
+    if reason:
+        return reason
     try:
         status = _git(
             path,
-            ("status", "--porcelain"),
-            "check whether the source checkout has uncommitted changes",
+            ("status", "--porcelain", "--ignored", "--untracked-files=all"),
+            "check whether the source checkout is clean",
         )
     except _GitUnavailable:
-        return ()
-    if status is None:
-        warnings.append("could not check for uncommitted changes")
-    elif status.returncode == 0 and status.stdout.strip():
-        warnings.append("uncommitted changes")
+        return _keep("git is not available")
+    if status is None or status.returncode != 0:
+        return _keep("could not be checked")
+    dirty = _status_reason(status.stdout)
+    if dirty:
+        return dirty
     try:
         ahead = _git(
             path,
@@ -605,99 +899,100 @@ def _checkout_warnings(path: Path) -> tuple[str, ...]:
             "check whether the source checkout has unpushed commits",
         )
     except _GitUnavailable:
-        return tuple(warnings)
+        return _keep("git is not available")
     if ahead is None:
-        warnings.append("could not check for unpushed commits")
-        return tuple(warnings)
-    if ahead.returncode == 0:
-        if _positive_count(ahead.stdout):
-            warnings.append("unpushed commits")
-        return tuple(warnings)
+        return _keep("could not be checked")
+    if ahead.returncode != 0:
+        return _keep("has no upstream")
+    count = ahead.stdout.strip()
+    if not count.isdigit():
+        return _keep("could not be checked")
+    if int(count) > 0:
+        return _keep("has unpushed commits")
     try:
-        local = _git(
-            path,
-            ("rev-list", "--count", "HEAD", "--not", "--remotes"),
-            "check whether the source checkout has commits that are not on a remote",
-        )
+        listed = _git(path, ("stash", "list"), "check whether the source checkout has a stash")
     except _GitUnavailable:
-        return tuple(warnings)
-    if local is not None and local.returncode == 0 and _positive_count(local.stdout):
-        warnings.append("unpushed commits")
-    return tuple(warnings)
+        return _keep("git is not available")
+    if listed is None or listed.returncode != 0:
+        return _keep("could not be checked")
+    if listed.stdout.strip():
+        return _keep("has a stash")
+    return None
 
 
-def _planned_data(environ: Mapping[str, str], home: Path) -> tuple[Path | None, Path | None]:
-    """The data directory and baseline file, or ``(None, None)`` when unsafe."""
+def _inspect_checkout(path: Path) -> SourceCheckout:
+    reason = _checkout_reason(path)
+    identity = None if reason else _dir_identity(path)
+    if reason is None and identity is None:
+        reason = _keep("could not be checked")
+    return SourceCheckout(path, reason, identity)
+
+
+def _will_delete_file(path: Path, root_dev: int) -> bool:
+    """True for a regular file on ``root_dev``. Symlinks are kept."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_dev == root_dev
+
+
+def _planned_data(
+    environ: Mapping[str, str], home: Path
+) -> tuple[Path | None, Path | None, tuple[str, ...], tuple[int, int] | None, bool]:
+    """Directory, baseline to delete, names kept, identity, and whether to rmdir.
+
+    The directory is None when it must not be touched at all.
+    """
+    empty = (None, None, (), None, False)
     directory = data_dir(environ, home)
     root_dir = Path(os.path.abspath(os.sep))
     if directory.name != "homenet":
-        return None, None
+        return empty
     if _same_path(directory, home) or _same_path(directory, root_dir):
-        return None, None
-    if _same_path(directory, directory.parent):
-        return None, None
-    if not _safe_directory(directory, home):
-        return None, None
-    baseline = directory / BASELINE_FILENAME
+        return empty
+    if _same_path(directory, directory.parent) or not _safe_directory(directory, home):
+        return empty
+    identity = _dir_identity(directory)
+    if identity is None:
+        return empty
     try:
-        info = os.lstat(baseline)
+        names = sorted(os.listdir(directory))
     except OSError:
-        return directory, None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        return directory, None
-    return directory, baseline
+        return empty
+    left: list[str] = []
+    baseline: Path | None = None
+    for name in names:
+        candidate = directory / name
+        if name in DATA_FILE_NAMES and _will_delete_file(candidate, identity[0]):
+            baseline = candidate
+            continue
+        left.append(name)
+    return directory, baseline, tuple(left), identity, not left
 
 
 def plan_purge(environ: Mapping[str, str] | None = None, home: Path | None = None) -> PurgePlan:
-    """List the data directory and source checkouts ``--purge`` may delete.
+    """List data files and source checkouts ``--purge`` may delete.
 
-    Runs nothing except ``git`` status checks for checkouts that are git
-    repositories. When ``git`` is missing, those checks are skipped.
+    Git runs only for a checkout whose config cannot run a command. A checkout
+    that is not pristine is listed with a reason and is not deleted.
     """
     env = os.environ if environ is None else environ
     root = _home_from_env(env, home)
     if root is None:
         return PurgePlan(None, None, None, (), HOME_UNSET_MESSAGE)
-    directory, baseline = _planned_data(env, root)
-    checkouts = tuple(
-        SourceCheckout(path, _checkout_warnings(path)) for path in find_source_checkouts(root)
+    directory, baseline, left, identity, remove_directory = _planned_data(env, root)
+    checkouts = tuple(_inspect_checkout(path) for path in find_source_checkouts(root))
+    return PurgePlan(
+        root,
+        directory,
+        baseline,
+        checkouts,
+        None,
+        data_left=left,
+        remove_data_directory=remove_directory,
+        data_identity=identity,
     )
-    return PurgePlan(root, directory, baseline, checkouts, None)
-
-
-def _reraise_rmtree(func: object, path: object, exc: BaseException) -> None:
-    raise exc
-
-
-def _remove_tree(path: Path) -> None:
-    """Delete a real directory. A symlink root is refused before ``rmtree``."""
-    if not os.path.isabs(os.fspath(path)):
-        raise SelfInstallError(
-            f"{path} is not an absolute path, so it was not deleted.",
-            "homenet only deletes folders inside your home directory.",
-        )
-    try:
-        info = os.lstat(path)
-    except OSError as exc:
-        raise SelfInstallError(
-            f"Could not delete {path}: {exc.strerror or exc}",
-            "Delete that folder yourself if you still want it gone.",
-        ) from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise SelfInstallError(
-            f"{path} is not a real folder, so it was not deleted.",
-            "homenet does not follow symbolic links.",
-        )
-    try:
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=_reraise_rmtree)
-        else:
-            shutil.rmtree(path)
-    except OSError as exc:
-        raise SelfInstallError(
-            f"Could not delete {path}: {exc.strerror or exc}",
-            "Delete that folder yourself if you still want it gone.",
-        ) from exc
 
 
 def _refuse_outside(path: Path) -> None:
@@ -707,15 +1002,157 @@ def _refuse_outside(path: Path) -> None:
     )
 
 
+def _delete_error(path: Path, exc: OSError) -> SelfInstallError:
+    return SelfInstallError(
+        f"Could not delete {path}: {exc.strerror or exc}",
+        "Delete that folder yourself if you still want it gone.",
+    )
+
+
+def _changed(path: Path) -> SelfInstallError:
+    return SelfInstallError(
+        f"{path} changed while homenet was checking it, so it was not deleted.",
+        "homenet left that folder in place.",
+    )
+
+
+def _mount_error(path: Path) -> SelfInstallError:
+    return SelfInstallError(
+        f"{path} has a mount inside it, so it was not deleted.",
+        "homenet left that folder in place.",
+    )
+
+
+def _dir_flags(nofollow: bool) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if nofollow:
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _open_chain(home: Path, target: Path) -> tuple[int, int, str]:
+    """Open ``target`` from ``home`` without following links below ``home``.
+
+    Returns ``(parent_fd, dir_fd, name)``. The caller closes both descriptors.
+    ``home`` itself may be a symlink; components under it may not.
+    """
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise SelfInstallError(
+            f"{target} could not be checked, so it was not deleted.",
+            "homenet left that folder in place.",
+        )
+    root = Path(os.path.abspath(os.fspath(home)))
+    dest = Path(os.path.abspath(os.fspath(target)))
+    try:
+        parts = dest.relative_to(root).parts
+    except ValueError as exc:
+        raise SelfInstallError(
+            f"{target} is outside the home directory or is a symbolic link, so it was not deleted.",
+            "homenet only deletes real folders inside your home directory.",
+        ) from exc
+    if not parts:
+        _refuse_outside(target)
+    fds: list[int] = []
+    try:
+        fds.append(os.open(root, _dir_flags(False)))
+        for part in parts:
+            fds.append(os.open(part, _dir_flags(True), dir_fd=fds[-1]))
+    except OSError as exc:
+        for opened in fds:
+            os.close(opened)
+        raise SelfInstallError(
+            f"{target} is outside the home directory or is a symbolic link, so it was not deleted.",
+            "homenet only deletes real folders inside your home directory.",
+        ) from exc
+    parent = fds[-2]
+    directory = fds[-1]
+    for opened in fds[:-2]:
+        os.close(opened)
+    return parent, directory, parts[-1]
+
+
+def _fd_has_foreign_device(dir_fd: int, root_dev: int) -> bool:
+    """True when this directory, opened by fd, contains another device."""
+    try:
+        if os.fstat(dir_fd).st_dev != root_dev:
+            return True
+        names = os.listdir(dir_fd)
+    except OSError:
+        return True
+    for name in names:
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return True
+        if info.st_dev != root_dev:
+            return True
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            continue
+        try:
+            child = os.open(name, _dir_flags(True), dir_fd=dir_fd)
+        except OSError:
+            return True
+        try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                return True
+            if _fd_has_foreign_device(child, root_dev):
+                return True
+        finally:
+            os.close(child)
+    return False
+
+
+def _remove_children(dir_fd: int, root_dev: int) -> None:
+    """Unlink entries of ``dir_fd``. Directories are opened with ``O_NOFOLLOW``."""
+    for name in os.listdir(dir_fd):
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if info.st_dev != root_dev:
+            raise SelfInstallError(
+                "A folder changed while homenet was deleting it, so homenet stopped.",
+                "Delete the rest of that folder yourself if you still want it gone.",
+            )
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            child = os.open(name, _dir_flags(True), dir_fd=dir_fd)
+            try:
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise SelfInstallError(
+                        "A folder changed while homenet was deleting it, so homenet stopped.",
+                        "Delete the rest of that folder yourself if you still want it gone.",
+                    )
+                _remove_children(child, root_dev)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=dir_fd)
+            continue
+        os.unlink(name, dir_fd=dir_fd)
+
+
+def _unlink_regular(dir_fd: int, name: str, root_dev: int) -> bool:
+    """Unlink one allowlisted regular file. Symlinks and other devices stay."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_dev != root_dev:
+        return False
+    os.unlink(name, dir_fd=dir_fd)
+    return True
+
+
 def remove_data_dir(
     path: Path,
     *,
     home: Path,
+    identity: tuple[int, int],
     environ: Mapping[str, str] | None = None,
-) -> None:
-    """Delete the homenet data directory after containment and symlink checks.
+) -> DataRemoval:
+    """Delete allowlisted files in the homenet data directory, through a pinned fd.
 
     ``path`` must be that directory itself (``.../homenet``), never a parent.
+    ``identity`` is the ``st_dev, st_ino`` pair captured when the directory was
+    checked. The directory is removed only when it is empty afterwards.
     """
     env = os.environ if environ is None else environ
     root = _home_from_env(env, home)
@@ -736,7 +1173,31 @@ def remove_data_dir(
         )
     if not _safe_directory(path, root):
         _refuse_outside(path)
-    _remove_tree(path)
+    parent, directory, name = _open_chain(root, path)
+    try:
+        info = os.fstat(directory)
+        if (info.st_dev, info.st_ino) != tuple(identity):
+            raise _changed(path)
+        removed: list[Path] = []
+        for filename in sorted(DATA_FILE_NAMES):
+            if _unlink_regular(directory, filename, info.st_dev):
+                removed.append(path / filename)
+        left = tuple(sorted(os.listdir(directory)))
+        directory_removed = False
+        if not left:
+            try:
+                os.rmdir(name, dir_fd=parent)
+            except OSError:
+                left = tuple(sorted(os.listdir(directory)))
+            else:
+                directory_removed = True
+                removed.append(path)
+        return DataRemoval(tuple(removed), left, path, directory_removed)
+    except OSError as exc:
+        raise _delete_error(path, exc) from exc
+    finally:
+        os.close(directory)
+        os.close(parent)
 
 
 def _holds_running_editable(checkout: Path) -> bool:
@@ -760,11 +1221,18 @@ def _holds_running_editable(checkout: Path) -> bool:
         return True
 
 
-def remove_checkout(path: Path, *, home: Path, environ: Mapping[str, str] | None = None) -> None:
-    """Delete one source checkout after the same checks as the search.
+def remove_checkout(
+    path: Path,
+    *,
+    home: Path,
+    identity: tuple[int, int],
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Delete one pristine source checkout through the fd captured for ``path``.
 
     When the checkout holds the running editable install, raises
-    :class:`SelfInstallError` with the manual uninstall steps.
+    :class:`SelfInstallError` with the manual uninstall steps. A checkout that
+    is no longer pristine, or that contains another device, is left in place.
     """
     env = os.environ if environ is None else environ
     root = _home_from_env(env, home)
@@ -781,32 +1249,43 @@ def remove_checkout(path: Path, *, home: Path, environ: Mapping[str, str] | None
     if _holds_running_editable(path):
         message, hint = _manual(KIND_EDITABLE, DIST_NAME, str(path))
         raise SelfInstallError(message, hint)
-    _remove_tree(path)
+    reason = _checkout_reason(path)
+    if reason:
+        raise SelfInstallError(f"{path} {reason}", "homenet left that folder in place.")
+    parent, directory, name = _open_chain(root, path)
+    try:
+        info = os.fstat(directory)
+        if (info.st_dev, info.st_ino) != tuple(identity):
+            raise _changed(path)
+        if os.fstat(parent).st_dev != info.st_dev or _fd_has_foreign_device(directory, info.st_dev):
+            raise _mount_error(path)
+        _remove_children(directory, info.st_dev)
+        os.rmdir(name, dir_fd=parent)
+    except OSError as exc:
+        raise _delete_error(path, exc) from exc
+    finally:
+        os.close(directory)
+        os.close(parent)
 
 
 def purge_saved_data(
     environ: Mapping[str, str] | None = None, home: Path | None = None
 ) -> tuple[Path, ...]:
-    """Remove the homenet data directory when the containment checks pass.
+    """Remove ``baseline.json`` when the containment checks pass.
 
-    Does not search for or delete source checkouts. Returns the baseline file
-    (when it was a real file) and the directory. Returns an empty tuple when
-    ``HOME`` is unset, the directory is missing, or the path is refused.
-    Raises :class:`SelfInstallError` when a safe directory cannot be deleted.
+    Does not search for or delete source checkouts. Removes the data directory
+    only when that leaves it empty. Returns the paths that were actually
+    removed. Returns an empty tuple when ``HOME`` is unset, the directory is
+    missing, or the path is refused.
     """
     env = os.environ if environ is None else environ
     root = _home_from_env(env, home)
     if root is None:
         return ()
-    directory, baseline = _planned_data(env, root)
-    if directory is None:
+    directory, _baseline, _left, identity, _remove_directory = _planned_data(env, root)
+    if directory is None or identity is None:
         return ()
-    remove_data_dir(directory, home=root, environ=env)
-    removed: list[Path] = []
-    if baseline is not None:
-        removed.append(baseline)
-    removed.append(directory)
-    return tuple(removed)
+    return remove_data_dir(directory, home=root, identity=identity, environ=env).removed
 
 
 def run_uninstall(cmd: Command, timeout: float = UNINSTALL_TIMEOUT) -> None:

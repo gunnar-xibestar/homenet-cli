@@ -167,21 +167,24 @@ lookup result. ``upstream`` is filled when a server is a local resolver.
 
 ``homenet uninstall --json``::
 
-    {"cancelled": bool, "checkouts": [{"path": str, "warnings": [str, ...]}, ...],
-     "data_kept": bool, "data_paths": [str, ...], "distribution": str,
-     "install": "venv"|"pipx"|"user", "purged": bool,
+    {"cancelled": bool, "checkouts": [{"kept_reason": str|null, "path": str}, ...],
+     "data_kept": bool, "data_left": [str, ...], "data_paths": [str, ...],
+     "distribution": str, "install": "venv"|"pipx"|"user", "purged": bool,
      "removed_checkouts": [str, ...], "removed_paths": [str, ...],
      "uninstalled": bool}
 
 ``install`` is how this copy was installed. ``data_paths`` is the baseline
 file and its folder. ``removed_paths`` is filled only after ``--purge``
-deletes that data folder. ``checkouts`` lists source checkouts that were
-eligible to delete, with any git warnings. ``removed_checkouts`` is filled
-only after those folders are deleted. ``data_kept`` is about the saved
-snapshot only: it is true when the uninstall finished, or was cancelled,
-without deleting that data. Strings go through :func:`_clean`.
-A system, editable, or unknown install is an error object, not this shape.
-``--show-cmd --json`` adds ``commands`` the same way as other commands.
+deletes a path (``baseline.json``, and the data folder when that leaves it
+empty). ``data_left`` is every other name still in the data folder.
+``checkouts`` lists source checkouts under the home directory. ``kept_reason``
+is null when a checkout was pristine, and a short reason when it was kept.
+``removed_checkouts`` is filled only after those folders are deleted.
+``data_kept`` is about the saved snapshot only: it is true when the uninstall
+finished, or was cancelled, without deleting that data. Strings go through
+:func:`_clean`. A system, editable, or unknown install is an error object,
+not this shape. ``--show-cmd --json`` adds ``commands`` the same way as other
+commands.
 
 ``doctor`` ``ok`` is false only when a check failed at error severity.
 Warnings leave it true, including a missing ``nmcli``, ``iw``, or ``resolvectl``.
@@ -263,6 +266,40 @@ def format_error_json(message: str, hint: str | None = None) -> str:
     return _dumps({"error": text, "fix_hint": fix})
 
 
+def _kept_data_lines(directory: str | None, names: Sequence[str], *, after: bool) -> list[str]:
+    """Names left in the data directory. ``after`` is the wording once deletion ran."""
+    if not names or not directory:
+        return []
+    where = _clean(directory) or ""
+    if after:
+        title = f"Kept {where} because it still contains:"
+    else:
+        title = f"Kept in {where}:"
+    lines = [title]
+    lines.extend(f"  {_clean(name) or ''}" for name in names)
+    return lines
+
+
+def _path_block(title: str, paths: Sequence[str]) -> list[str]:
+    if not paths:
+        return []
+    lines = ["", title]
+    lines.extend(f"  {_clean(path) or ''}" for path in paths)
+    return lines
+
+
+def _reason_block(title: str, rows: Sequence[tuple[str, str]]) -> list[str]:
+    if not rows:
+        return []
+    lines = ["", title]
+    for path, reason in rows:
+        lines.append(f"  {_clean(path) or ''}")
+        text = _clean(reason) or ""
+        if text:
+            lines.append(f"    {text}")
+    return lines
+
+
 def format_uninstall_preview(
     distribution: str,
     kind: str,
@@ -270,9 +307,11 @@ def format_uninstall_preview(
     paths: Sequence[str],
     *,
     purge: bool,
-    checkouts: Sequence[tuple[str, Sequence[str]]] = (),
+    remove_checkouts: Sequence[str] = (),
+    kept_checkouts: Sequence[tuple[str, str]] = (),
+    kept_data: Sequence[str] = (),
+    data_dir: str | None = None,
     purge_note: str | None = None,
-    keep_checkouts: bool = False,
 ) -> str:
     """Text shown before any uninstall prompt: the command, then paths to delete."""
     label = _INSTALL_LABELS.get(kind, kind)
@@ -283,18 +322,14 @@ def format_uninstall_preview(
             lines.append("Data to remove:")
             for path in paths:
                 lines.append(f"  {_clean(path) or ''}")
-        elif not purge_note:
+        elif not purge_note and not kept_data:
             lines.append("No saved data folder to remove.")
-        if checkouts:
+        kept = _kept_data_lines(data_dir, kept_data, after=False)
+        if kept and paths:
             lines.append("")
-            title = "Source checkouts kept:" if keep_checkouts else "Source checkouts to remove:"
-            lines.append(title)
-            for path, warnings in checkouts:
-                lines.append(f"  {_clean(path) or ''}")
-                for warning in warnings:
-                    text = _clean(warning) or ""
-                    if text:
-                        lines.append(f"    Warning: {text}")
+        lines.extend(kept)
+        lines.extend(_path_block("Source checkouts to remove:", remove_checkouts))
+        lines.extend(_reason_block("Source checkouts kept:", kept_checkouts))
         note = _clean(purge_note) if purge_note else None
         if note:
             lines.append("")
@@ -317,6 +352,9 @@ def format_uninstall_result(
     *,
     purge: bool,
     removed_checkouts: Sequence[str] = (),
+    kept_checkouts: Sequence[tuple[str, str]] = (),
+    kept_data: Sequence[str] = (),
+    data_dir: str | None = None,
     note: str | None = None,
 ) -> str:
     """Text after a successful uninstall. Says whether saved data was kept."""
@@ -325,10 +363,12 @@ def format_uninstall_result(
     if purge:
         if removed:
             lines.extend(f"Removed {_clean(path) or ''}." for path in removed)
-        elif not note:
+        elif not note and not kept_data:
             where = _clean(paths[0]) if paths else None
             lines.append(f"No saved data was found at {where}.")
+        lines.extend(_kept_data_lines(data_dir, kept_data, after=True))
         lines.extend(f"Removed {_clean(path) or ''}." for path in removed_checkouts)
+        lines.extend(_reason_block("Source checkouts kept:", kept_checkouts))
         text = _clean(note) if note else None
         if text:
             lines.append(text)
@@ -347,23 +387,25 @@ def format_uninstall_json(
     purge: bool,
     cancelled: bool,
     uninstalled: bool,
-    checkouts: Sequence[tuple[str, Sequence[str]]] = (),
+    checkouts: Sequence[tuple[str, str | None]] = (),
     removed_checkouts: Sequence[str] = (),
+    data_left: Sequence[str] = (),
 ) -> str:
     """JSON for ``homenet uninstall --json``.
 
-    Shape: ``cancelled``, ``checkouts``, ``data_kept``, ``data_paths``,
-    ``distribution``, ``install``, ``purged``, ``removed_checkouts``,
-    ``removed_paths``, ``uninstalled``. ``data_kept`` is about the saved
-    snapshot, not source checkouts.
+    Shape: ``cancelled``, ``checkouts``, ``data_kept``, ``data_left``,
+    ``data_paths``, ``distribution``, ``install``, ``purged``,
+    ``removed_checkouts``, ``removed_paths``, ``uninstalled``. ``data_kept``
+    is about the saved snapshot, not source checkouts. ``kept_reason`` is null
+    when that checkout was pristine.
     """
     purged = bool(removed) and purge and uninstalled and not cancelled
     checkout_rows = []
-    for path, warnings in checkouts:
+    for path, reason in checkouts:
         checkout_rows.append(
             {
+                "kept_reason": _clean(reason) if reason else None,
                 "path": _clean(path) or "",
-                "warnings": [_clean(warning) or "" for warning in warnings],
             }
         )
     return _dumps(
@@ -371,6 +413,7 @@ def format_uninstall_json(
             "cancelled": cancelled,
             "checkouts": checkout_rows,
             "data_kept": not purged,
+            "data_left": [_clean(name) or "" for name in data_left],
             "data_paths": [_clean(path) or "" for path in paths],
             "distribution": _clean(distribution) or "",
             "install": _clean(kind) or "",
