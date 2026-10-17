@@ -165,27 +165,13 @@ including the WSL note. ``wifi`` exits 0 either way.
 lookup result. ``upstream`` is filled when a server is a local resolver.
 ``dns`` exits 0.
 
-``homenet uninstall --json``::
-
-    {"cancelled": bool, "data_kept": bool, "data_paths": [str, ...],
-     "distribution": str, "install": "venv"|"pipx"|"user", "purged": bool,
-     "removed_paths": [str, ...], "uninstalled": bool}
-
-``install`` is how this copy was installed. ``data_paths`` is the baseline
-file and its folder. ``removed_paths`` is filled only after ``--purge``
-deletes them. ``data_kept`` is true when the uninstall finished, or was
-cancelled, without deleting that data. Strings go through :func:`_clean`.
-A system, editable, or unknown install is an error object, not this shape.
-``--show-cmd --json`` adds ``commands`` the same way as other commands.
-
 ``doctor`` ``ok`` is false only when a check failed at error severity.
 Warnings leave it true, including a missing ``nmcli``, ``iw``, or ``resolvectl``.
 ``new-devices`` exits 0 when ``has_changes`` is false,
 1 when it is true, and 2 when the command fails.
-``ports``, ``services``, ``router``, ``speed``, and ``uninstall`` exit 0 on
-success and 1 when the command fails. ``uninstall`` also exits 0 when the
-answer is no. No open ports, and a router with no admin page, are still
-success. Argparse usage errors exit 2.
+``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
+when the command fails. No open ports, and a router with no admin page, are
+still success. Argparse usage errors exit 2.
 
 ``--json`` errors are a JSON object on stderr::
 
@@ -223,11 +209,6 @@ from homenet.core.wsl import WSL_NAT_FIX, wsl_nat_detail
 
 _UNKNOWN = "unknown"
 _NOT_AVAILABLE = "not available"
-_INSTALL_LABELS = {
-    "venv": "pip in a virtual environment",
-    "user": "pip in your user site-packages",
-    "pipx": "pipx",
-}
 
 _WHOAMI_NOTES = (
     "The interface is how this computer is connected, such as Wi-Fi.",
@@ -256,85 +237,6 @@ def format_error_json(message: str, hint: str | None = None) -> str:
     """
     text, fix = _error_parts(message, hint)
     return _dumps({"error": text, "fix_hint": fix})
-
-
-def format_uninstall_preview(
-    distribution: str,
-    kind: str,
-    display: str,
-    paths: Sequence[str],
-    *,
-    purge: bool,
-) -> str:
-    """Text shown before uninstall runs: the command, then the saved-data paths."""
-    label = _INSTALL_LABELS.get(kind, kind)
-    name = _clean(distribution) or "homenet"
-    lines = [f"This will uninstall {name} ({label}):", "", _clean(display) or "", ""]
-    if purge:
-        lines.append("Saved data to remove:")
-        for path in paths:
-            lines.append(f"  {_clean(path) or ''}")
-    else:
-        where = _clean(paths[0]) if paths else None
-        lines.append(f"Saved data will be kept at {where}.")
-    return "\n".join(lines)
-
-
-def format_uninstall_cancelled() -> str:
-    """The user answered no. Nothing was run and nothing was deleted."""
-    return "Uninstall cancelled. Nothing was removed."
-
-
-def format_uninstall_result(
-    distribution: str,
-    paths: Sequence[str],
-    removed: Sequence[str],
-    *,
-    purge: bool,
-) -> str:
-    """Text after a successful uninstall. Says whether saved data was kept."""
-    name = _clean(distribution) or "homenet"
-    lines = [f"Uninstalled {name}."]
-    if purge:
-        if removed:
-            lines.extend(f"Removed {_clean(path) or ''}." for path in removed)
-        else:
-            where = _clean(paths[0]) if paths else None
-            lines.append(f"No saved data was found at {where}.")
-    else:
-        where = _clean(paths[0]) if paths else None
-        lines.append(f"Saved data was kept at {where}.")
-    return "\n".join(lines)
-
-
-def format_uninstall_json(
-    *,
-    distribution: str,
-    kind: str,
-    paths: Sequence[str],
-    removed: Sequence[str],
-    purge: bool,
-    cancelled: bool,
-    uninstalled: bool,
-) -> str:
-    """JSON for ``homenet uninstall --json``.
-
-    Shape: ``cancelled``, ``data_kept``, ``data_paths``, ``distribution``,
-    ``install``, ``purged``, ``removed_paths``, ``uninstalled``.
-    """
-    purged = bool(removed) and purge and uninstalled and not cancelled
-    return _dumps(
-        {
-            "cancelled": cancelled,
-            "data_kept": not purged,
-            "data_paths": [_clean(path) or "" for path in paths],
-            "distribution": _clean(distribution) or "",
-            "install": _clean(kind) or "",
-            "purged": purged,
-            "removed_paths": [_clean(path) or "" for path in removed],
-            "uninstalled": bool(uninstalled and not cancelled),
-        }
-    )
 
 
 def format_explain_json(command: str, commands: Sequence[dict]) -> str:

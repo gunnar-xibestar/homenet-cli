@@ -16,13 +16,6 @@ it passes ``on_progress`` and prints that callback on stderr.
 :func:`homenet.core.dns.dns_lookup_test`. When
 :func:`homenet.core.netinfo.detect` can see a gateway, a DNS server at that
 address is labeled as the router.
-``uninstall`` asks :func:`homenet.core.selfinstall.detect_install` and, for a
-venv, pipx, or user-site install, :func:`homenet.core.selfinstall.run_uninstall`.
-It prints that command with :meth:`~homenet.core.commands.Command.display`
-before running it. ``--yes`` skips the y/N question. With no terminal and no
-``--yes``, it refuses instead of waiting. ``--purge`` deletes the baseline
-file and data directory from :func:`homenet.core.baseline.default_baseline_path`
-only after that same yes. A system, editable, or unknown install is not touched.
 The home network scans come from core. This module does not spawn commands
 or read ``/sys``. ``devices`` labels this computer from the
 :class:`~homenet.core.netinfo.NetInfo` core already collected, including ``mac``.
@@ -30,10 +23,9 @@ or read ``/sys``. ``devices`` labels this computer from the
 ``new-devices`` exits 0 when the live scan matches the saved snapshot,
 1 when a device is new, missing, changed, or has a different MAC address,
 and 2 when the command fails.
-``ports``, ``services``, ``router``, ``speed``, and ``uninstall`` exit 0 on
-success and 1 on failure. ``uninstall`` also exits 0 when the answer is no.
-``wifi`` and ``dns`` exit 0, including when Wi-Fi is unavailable,
-inside WSL, or when the lookup does not succeed. None of those need sudo.
+``ports``, ``services``, ``router``, and ``speed`` exit 0 on success and 1
+on failure. ``wifi`` and ``dns`` exit 0, including when Wi-Fi is unavailable,
+inside WSL, or when the lookup does not succeed. Neither needs sudo.
 Usage errors exit 2.
 A closed stdout pipe, such as ``homenet devices | head``, exits 1 with no
 traceback.
@@ -114,7 +106,6 @@ from homenet.core import (
     port_notes,
     ports,
     router,
-    selfinstall,
     speed,
     wifi,
 )
@@ -146,10 +137,6 @@ from homenet.output import (
     format_services_json,
     format_speed,
     format_speed_json,
-    format_uninstall_cancelled,
-    format_uninstall_json,
-    format_uninstall_preview,
-    format_uninstall_result,
     format_whoami,
     format_whoami_json,
     format_wifi,
@@ -248,7 +235,7 @@ _SUDO_SECTION = (
     '    sudo "$(command -v homenet)" devices\n'
     "\n"
     "  The same form works for a pipx install. doctor, whoami-net, explain,\n"
-    "  speed, wifi, dns, and uninstall do not need sudo."
+    "  speed, wifi, and dns do not need sudo."
 )
 
 
@@ -378,24 +365,6 @@ _COMMANDS: tuple[_Command, ...] = (
         "warning, so doctor still exits 0. Doctor does not need sudo. A privileges warning "
         "tells you how to re-run a scan so sudo can still find homenet.",
         "homenet doctor",
-        json=True,
-    ),
-    _Command(
-        "uninstall",
-        "Remove homenet from this computer",
-        "Remove this copy of homenet. A virtual environment, a pipx install, or a "
-        "user-site install is removed after you confirm. The question defaults to no. "
-        "Pass --yes to skip it. When this is not an interactive terminal, --yes is "
-        "required so homenet does not wait for an answer.\n"
-        "\n"
-        "The saved device snapshot is kept unless you pass --purge. homenet lists that "
-        "file and its folder before it deletes them, and the same yes covers both.\n"
-        "\n"
-        "A system package, an editable checkout, or an install homenet does not "
-        "recognize is left alone. homenet prints the command to run yourself and exits 1.\n"
-        "\n"
-        "uninstall does not need sudo.",
-        "homenet uninstall",
         json=True,
     ),
 )
@@ -764,103 +733,6 @@ def _stderr_is_tty() -> bool:
         return bool(sys.stderr.isatty())
     except (AttributeError, OSError, ValueError):
         return False
-
-
-def _stdin_is_tty() -> bool:
-    try:
-        return bool(sys.stdin.isatty())
-    except (AttributeError, OSError, ValueError):
-        return False
-
-
-def _confirm_uninstall(args: argparse.Namespace, prompt: str) -> bool:
-    """True for yes. ``--yes`` skips the question. Anything else, including empty, is no."""
-    if getattr(args, "yes", False):
-        return True
-    if getattr(args, "json", False):
-        print(prompt, file=sys.stderr, end="")
-        try:
-            answer = sys.stdin.readline()
-        except EOFError:
-            answer = ""
-    else:
-        try:
-            answer = input(prompt)
-        except EOFError:
-            answer = ""
-    return answer.strip().lower() in {"y", "yes"}
-
-
-def _run_uninstall(args: argparse.Namespace) -> int:
-    """Confirm, then uninstall. Prompts and printing stay here; core runs the command."""
-    info = selfinstall.detect_install()
-    if info.command is None:
-        return _fail_message(args, info.message, info.hint)
-    paths = selfinstall.saved_data_paths()
-    path_text = tuple(str(path) for path in paths)
-    display = _clean(info.command.display()) or ""
-    purge = bool(getattr(args, "purge", False))
-    if not getattr(args, "yes", False) and not _stdin_is_tty():
-        extra = " --purge" if purge else ""
-        return _fail_message(
-            args,
-            "homenet will not uninstall without a yes, and this is not an interactive terminal.",
-            f"Re-run with --yes to uninstall without a prompt: `homenet uninstall --yes{extra}`.",
-        )
-    if not getattr(args, "json", False):
-        print(
-            format_uninstall_preview(info.distribution, info.kind, display, path_text, purge=purge)
-        )
-        print()
-    prompt = (
-        "Uninstall homenet and delete saved data? [y/N] " if purge else "Uninstall homenet? [y/N] "
-    )
-    if not _confirm_uninstall(args, prompt):
-        if getattr(args, "json", False):
-            _print_ok(
-                args,
-                format_uninstall_json(
-                    distribution=info.distribution,
-                    kind=info.kind,
-                    paths=path_text,
-                    removed=(),
-                    purge=False,
-                    cancelled=True,
-                    uninstalled=False,
-                ),
-            )
-        else:
-            print(format_uninstall_cancelled())
-        return 0
-    try:
-        selfinstall.run_uninstall(info.command)
-    except selfinstall.SelfInstallError as exc:
-        where = _clean(path_text[0]) if path_text else ""
-        note = "Saved data was not removed." if purge else f"Saved data was kept at {where}."
-        hint = f"{exc.hint} {note}" if exc.hint else note
-        return _fail_message(args, str(exc), hint)
-    removed: tuple[str, ...] = ()
-    if purge:
-        try:
-            removed = tuple(str(path) for path in selfinstall.purge_saved_data())
-        except selfinstall.SelfInstallError as exc:
-            return _fail(args, exc)
-    if getattr(args, "json", False):
-        _print_ok(
-            args,
-            format_uninstall_json(
-                distribution=info.distribution,
-                kind=info.kind,
-                paths=path_text,
-                removed=removed,
-                purge=purge,
-                cancelled=False,
-                uninstalled=True,
-            ),
-        )
-    else:
-        print(format_uninstall_result(info.distribution, path_text, removed, purge=purge))
-    return 0
 
 
 def _run_speed(args: argparse.Namespace) -> int:
@@ -1363,12 +1235,7 @@ def _run_explain(args: argparse.Namespace) -> int:
     except ValueError:
         message, hint = _invalid_target(ip if name in _HOST_COMMANDS else None)
         return _fail_message(args, message, hint, code)
-    except (
-        NmapError,
-        netinfo.NetInfoError,
-        speed.SpeedError,
-        selfinstall.SelfInstallError,
-    ) as exc:
+    except (NmapError, netinfo.NetInfoError, speed.SpeedError) as exc:
         return _fail(args, exc, code)
 
     if args.json:
@@ -1391,7 +1258,6 @@ _HANDLERS = {
     "speed": _run_speed,
     "wifi": _run_wifi,
     "dns": _run_dns,
-    "uninstall": _run_uninstall,
 }
 
 
@@ -1415,17 +1281,6 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
             "--json",
             action="store_true",
             help="Print JSON to stdout, with no banner. Errors go to stderr as JSON.",
-        )
-    if spec.name == "uninstall":
-        parser.add_argument(
-            "--yes",
-            action="store_true",
-            help="Uninstall without asking. The default answer is no.",
-        )
-        parser.add_argument(
-            "--purge",
-            action="store_true",
-            help="Also delete saved data (the baseline file and its folder) after you confirm.",
         )
     _add_verbose(parser)
     _add_show_cmd(parser, json=spec.json)
