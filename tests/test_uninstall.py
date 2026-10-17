@@ -38,7 +38,7 @@ def _as_venv(monkeypatch, prefix: str) -> None:
 
 
 def _record(monkeypatch, git_status: dict[str, str] | None = None) -> list[tuple[list[str], dict]]:
-    """Record commands. Git status text is keyed by the real path of ``-C``."""
+    """Record commands. Git status text is keyed by the real ``--work-tree`` path."""
     calls: list[tuple[list[str], dict]] = []
     statuses = git_status or {}
 
@@ -49,6 +49,9 @@ def _record(monkeypatch, git_status: dict[str, str] | None = None) -> list[tuple
             cwd = ""
             if "-C" in args:
                 cwd = args[args.index("-C") + 1]
+            for arg in args:
+                if arg.startswith("--work-tree="):
+                    cwd = arg.split("=", 1)[1]
             key = os.path.realpath(cwd) if cwd else ""
             if "status" in args:
                 return subprocess.CompletedProcess(args, 0, stdout=statuses.get(key, ""), stderr="")
@@ -370,6 +373,19 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         )
     if case == "filter_evil":
         return _filter_checkout(home, "[filter.evil]\n\tclean = touch PWNED; cat\n")
+    if case == "core_worktree":
+        checkout = _write_checkout(home / "homenet-cli")
+        sibling = home / "clean-clone"
+        sibling.mkdir()
+        (sibling / "README").write_text("clean\n", encoding="utf-8")
+        git_dir = checkout / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            f"[core]\n\tworktree = {sibling}\n",
+            encoding="utf-8",
+        )
+        (checkout / "untracked.txt").write_text("keep\n", encoding="utf-8")
+        return [checkout, checkout / "untracked.txt"]
     if case == "bind_mount":
         checkout = _write_checkout(home / "homenet-cli")
         _safe_git(checkout)
@@ -404,6 +420,7 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         "stash",
         "worktree_config",
         "filter_evil",
+        "core_worktree",
         "bind_mount",
     ],
 )
@@ -466,6 +483,12 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case == "stash":
             assert "has a stash" in captured.out
+            assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+        if case == "core_worktree":
+            checkout = tmp_path / "home" / "homenet-cli"
+            assert checkout.is_dir()
+            assert (checkout / "untracked.txt").is_file()
+            assert "has custom git config" in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case in {"worktree_config", "filter_evil"}:
             assert "has custom git config" in captured.out
@@ -533,6 +556,10 @@ def test_typed_yes_deletes_checkout_and_data(monkeypatch, tmp_path, capsys):
     (path.parent / "linked.txt").symlink_to(secret)
     calls = _record(monkeypatch)
     _as_venv(monkeypatch, str(tmp_path / "venv"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "not-the-index"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "not-the-objects"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(tmp_path / "not-the-common"))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     prompts: list[str] = []
     shown: list[str] = []
@@ -551,17 +578,32 @@ def test_typed_yes_deletes_checkout_and_data(monkeypatch, tmp_path, capsys):
     git_calls = [(argv, kwargs) for argv, kwargs in calls if argv and argv[0] == "git"]
     assert git_calls
     git_argv, git_kwargs = git_calls[0]
-    assert git_argv[:5] == ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+    resolved = os.path.realpath(checkout)
+    git_dir = os.path.join(resolved, ".git")
+    assert git_argv[:7] == [
+        "git",
+        f"--git-dir={git_dir}",
+        f"--work-tree={resolved}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ]
     git_env = git_kwargs["env"]
+    assert git_env["GIT_DIR"] == git_dir
+    assert git_env["GIT_WORK_TREE"] == resolved
     assert git_env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert git_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert git_env["GIT_OPTIONAL_LOCKS"] == "0"
     assert git_env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_INDEX_FILE" not in git_env
     assert sorted(key for key in git_env if key.startswith("GIT_")) == [
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_NOSYSTEM",
+        "GIT_DIR",
         "GIT_OPTIONAL_LOCKS",
         "GIT_TERMINAL_PROMPT",
+        "GIT_WORK_TREE",
     ]
     assert prompts == [
         "Uninstall homenet and delete saved data? [y/N] ",

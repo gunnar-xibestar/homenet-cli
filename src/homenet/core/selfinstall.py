@@ -80,7 +80,18 @@ HOME_UNSET_MESSAGE = (
 # Names homenet itself writes. Anything else in the data directory is kept.
 DATA_FILE_NAMES = frozenset({BASELINE_FILENAME})
 _CONFIG_READ_LIMIT = 1024 * 1024
-_DANGEROUS_CORE = frozenset({"fsmonitor", "hookspath", "sshcommand", "pager", "editor"})
+_DANGEROUS_CORE = frozenset(
+    {
+        "fsmonitor",
+        "hookspath",
+        "sshcommand",
+        "pager",
+        "editor",
+        "worktree",
+        "bare",
+        "attributesfile",
+    }
+)
 _GIT_CONFIG_ARGS = (
     "-c",
     "core.fsmonitor=false",
@@ -608,9 +619,17 @@ class _GitUnavailable(Exception):
     """``git`` is not installed."""
 
 
-def _git_env() -> dict[str, str]:
-    """Environment for git: no system or global config, and no inherited ``GIT_*``."""
+def _git_env(git_dir: str, work_tree: str) -> dict[str, str]:
+    """Environment for git, pinned to one checkout.
+
+    Inherited ``GIT_*`` variables are dropped first, including ``GIT_DIR``,
+    ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``,
+    ``GIT_COMMON_DIR``, and ``GIT_CEILING_DIRECTORIES``. The directory and
+    work tree are then set to the checkout being checked.
+    """
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_DIR"] = git_dir
+    env["GIT_WORK_TREE"] = work_tree
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_OPTIONAL_LOCKS"] = "0"
@@ -621,14 +640,22 @@ def _git_env() -> dict[str, str]:
 def _git(
     checkout: Path, args: tuple[str, ...], purpose: str
 ) -> subprocess.CompletedProcess[str] | None:
-    """Run git in ``checkout``. None means the command failed. Missing git raises.
+    """Run git pinned to ``checkout``. None means the command failed. Missing git raises.
 
-    ``-c`` turns off fsmonitor and hooks for this process. Callers refuse a
-    repository config that can run a command before they get here.
+    ``--git-dir`` and ``--work-tree`` are the resolved checkout, so ``core.worktree``
+    cannot point git at another clone. ``-c`` turns off fsmonitor and hooks.
+    Callers refuse a repository config that can run a command before they get here.
     """
-    command = Command(("git", *_GIT_CONFIG_ARGS, "-C", os.fspath(checkout), *args), purpose)
+    work_tree = _realpath(checkout)
+    if not work_tree:
+        return None
+    git_dir = os.path.join(work_tree, ".git")
+    command = Command(
+        ("git", f"--git-dir={git_dir}", f"--work-tree={work_tree}", *_GIT_CONFIG_ARGS, *args),
+        purpose,
+    )
     try:
-        return run_command(command, GIT_TIMEOUT, env=_git_env())
+        return run_command(command, GIT_TIMEOUT, env=_git_env(git_dir, work_tree))
     except FileNotFoundError as exc:
         raise _GitUnavailable from exc
     except (subprocess.TimeoutExpired, PermissionError, OSError):
