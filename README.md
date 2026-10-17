@@ -139,9 +139,13 @@ What it runs depends on how homenet was installed. It prints that command before
 
 `--show-cmd` still prints the `$` line when the command actually runs. `homenet explain uninstall` prints the command and its purpose without running it. `--json` prints the result with no question on stdout. Add `--yes` for a script. `--show-cmd --json` adds the `commands` list, the same way as the other commands.
 
-The saved device snapshot stays put. homenet prints where it lives (`$XDG_DATA_HOME/homenet/baseline.json`, or `~/.local/share/homenet/baseline.json`) and says it was kept. `--purge` lists that file and its folder first, then deletes them after the same yes. Answering no runs nothing and deletes nothing.
+The saved device snapshot stays put. homenet prints where it lives (`$XDG_DATA_HOME/homenet/baseline.json`, or `~/.local/share/homenet/baseline.json`) and says it was kept.
 
-A system package (apt), an editable checkout, or an install homenet does not recognize is not removed. homenet prints the command to run yourself, such as `sudo apt remove python3-homenet-cli` or `python -m pip uninstall homenet-cli` from the source checkout, and exits 1. Nothing is run for those. `uninstall` does not need sudo.
+`--purge` deletes that data folder, and source checkouts it finds under your home directory. A folder counts as a checkout only when its name is exactly `homenet-cli` and it contains a `pyproject.toml` whose project name is `homenet-cli`. homenet lists every path it will delete, grouped as data and source checkouts, before it asks anything. `--yes` covers the uninstall and the data folder only. Deleting a source checkout always requires you to type `yes`, even when you passed `--yes`. If there is no terminal to type that, the checkouts stay and homenet says so. A checkout with uncommitted or unpushed git changes is called out in that list. Answering no runs nothing and deletes nothing.
+
+The search stays inside your home directory. It does not follow symbolic links, does not walk hidden folders other than `~/.local`, skips dependency folders such as `node_modules`, and only looks a few levels down. It will not delete your home directory, `/`, or any path outside your home. If `HOME` is unset or empty, it deletes no files and explains why. A relative or empty `XDG_DATA_HOME` is ignored, the same way as when saving a baseline. Only the homenet data folder is removed, never its parent.
+
+A system package (apt), an editable checkout, or an install homenet does not recognize is not removed. homenet prints the command to run yourself, such as `sudo apt remove python3-homenet-cli` or `python -m pip uninstall homenet-cli` from the source checkout, and exits 1. Nothing is run for those, and an editable checkout is not deleted. `uninstall` does not need sudo.
 
 ### `homenet wifi`
 

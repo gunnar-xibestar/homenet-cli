@@ -3,6 +3,26 @@
 Uses :class:`~homenet.core.commands.Command` and :func:`~homenet.core.commands.run_command`,
 so the command hook sees the real argv. Never prints and never calls ``sys.exit``.
 Saved data is the baseline path from :mod:`homenet.core.baseline`.
+
+``--purge`` may delete only two kinds of path:
+
+* the homenet data directory (``$XDG_DATA_HOME/homenet`` when that variable is
+  an absolute path, otherwise ``~/.local/share/homenet``)
+* source checkouts under the home directory
+
+A checkout is a directory named exactly ``homenet-cli`` whose ``pyproject.toml``
+has project name ``homenet-cli``. The search is :func:`os.walk` with
+``followlinks=False``, starting at ``HOME`` and stopping at
+:data:`CHECKOUT_MAX_DEPTH` (the home directory is depth 0). Symbolic links are
+not descended into and not deleted. Hidden directories are skipped, except
+``~/.local``. Directory names in :data:`SKIP_DIR_NAMES` (``node_modules`` and
+similar build or dependency folders) are skipped everywhere. A matched checkout
+is not walked into.
+
+A path is deleted only when :func:`os.path.realpath` of it is strictly inside
+:func:`os.path.realpath` of ``HOME``. ``/``, the home directory itself, and
+anything outside home are refused. When ``HOME`` is unset or empty, nothing
+is deleted.
 """
 
 from __future__ import annotations
@@ -12,6 +32,7 @@ import os
 import re
 import shutil
 import site
+import stat
 import subprocess  # noqa: S404 - TimeoutExpired only; the process is run_command
 import sys
 from collections.abc import Mapping
@@ -22,12 +43,33 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from homenet.core._text import clean_text
-from homenet.core.baseline import data_dir, default_baseline_path
+from homenet.core.baseline import BASELINE_FILENAME, data_dir, default_baseline_path
 from homenet.core.commands import Command, run_command
 
 DIST_NAME = "homenet-cli"
 APT_PACKAGE = "python3-homenet-cli"
 UNINSTALL_TIMEOUT = 120.0
+GIT_TIMEOUT = 10.0
+# Home is depth 0. ~/a/b/c/d/e/homenet-cli is depth 6 and is included.
+CHECKOUT_MAX_DEPTH = 6
+CHECKOUT_DIR_NAME = "homenet-cli"
+# Build and dependency directories. Hidden names are skipped separately,
+# except the direct child ~/.local.
+SKIP_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        "site-packages",
+        "venv",
+        "dist",
+        "build",
+        "vendor",
+    }
+)
+HOME_UNSET_MESSAGE = (
+    "HOME is unset or empty, so homenet did not delete any files. "
+    "Set HOME to your home folder if you still want saved data removed."
+)
 
 KIND_VENV = "venv"
 KIND_PIPX = "pipx"
@@ -278,57 +320,492 @@ def saved_data_paths(
     return default_baseline_path(environ, home), data_dir(environ, home)
 
 
-def _safe_data_dir(root: Path, baseline: Path) -> bool:
-    """True when ``root`` is the homenet data directory and not a symlink."""
-    if root.is_symlink() or not root.is_dir():
+@dataclass(frozen=True)
+class SourceCheckout:
+    """A source checkout that passed the containment checks."""
+
+    path: Path
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PurgePlan:
+    """What ``--purge`` may delete. Paths already passed the containment checks.
+
+    ``blocked`` is set when nothing may be deleted, which is when ``HOME`` is
+    unset or empty. ``data_dir`` is the homenet data directory, or None when
+    that directory is missing or not safe. ``baseline`` is the snapshot file
+    inside it when that file is a real file. ``checkouts`` are source
+    directories under the home directory.
+    """
+
+    home: Path | None
+    data_dir: Path | None
+    baseline: Path | None
+    checkouts: tuple[SourceCheckout, ...]
+    blocked: str | None = None
+
+
+def _home_from_env(environ: Mapping[str, str], home: Path | None) -> Path | None:
+    """The home directory, or None when it is unset or empty."""
+    if home is not None:
+        text = os.fspath(home).strip()
+    else:
+        raw = environ.get("HOME")
+        text = "" if raw is None else str(raw).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def _realpath(path: Path) -> str | None:
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    left_real = _realpath(left)
+    right_real = _realpath(right)
+    return bool(left_real) and left_real == right_real
+
+
+def _contained(path: Path, home: Path) -> bool:
+    """True when ``realpath(path)`` is strictly inside ``realpath(home)``."""
+    home_real = _realpath(home)
+    path_real = _realpath(path)
+    if not home_real or not path_real:
         return False
-    if root.name != "homenet" or baseline.parent != root:
+    root = os.path.abspath(os.sep)
+    if home_real == root or path_real == root or path_real == home_real:
+        return False
+    if not os.path.isabs(home_real) or not os.path.isabs(path_real):
         return False
     try:
-        resolved = root.resolve()
+        return os.path.commonpath([home_real, path_real]) == home_real
+    except ValueError:
+        return False
+
+
+def _is_symlink(path: Path) -> bool:
+    """True when ``path`` is a symlink. Unreadable paths count as unsafe."""
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError:
+        return True
+
+
+def _has_symlink_component(path: Path, home: Path) -> bool:
+    """True when any component from a child of ``home`` through ``path`` is a symlink."""
+    root = Path(os.path.abspath(os.fspath(home)))
+    target = Path(os.path.abspath(os.fspath(path)))
+    try:
+        parts = target.relative_to(root).parts
+    except ValueError:
+        return True
+    current = root
+    for index, part in enumerate(parts):
+        current = current / part
+        last = index == len(parts) - 1
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return not last
+        except OSError:
+            return True
+        if stat.S_ISLNK(info.st_mode):
+            return True
+    return False
+
+
+def _safe_directory(path: Path, home: Path) -> bool:
+    """True for a real directory strictly inside ``home``, with no symlink components."""
+    if not _contained(path, home) or _has_symlink_component(path, home):
+        return False
+    try:
+        info = os.lstat(path)
     except OSError:
         return False
-    if resolved == Path(resolved.anchor):
-        return False
+    return stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
+
+def _skipped_dirname(name: str, parent_depth: int) -> bool:
+    if name in SKIP_DIR_NAMES:
+        return True
+    if name.startswith("."):
+        return not (parent_depth == 0 and name == ".local")
+    return False
+
+
+def _toml_loads():
+    """``tomllib.loads`` on 3.11+, ``tomli.loads`` when that package is installed."""
     try:
-        if resolved == Path.home().resolve():
-            return False
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            return None
+    return tomllib.loads
+
+
+def _load_toml(text: str) -> dict | None:
+    loads = _toml_loads()
+    if loads is None:
+        return _project_table_fallback(text)
+    try:
+        data = loads(text)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_NAME_LINE = re.compile(r"""^name\s*=\s*(['"])(.*?)\1\s*(?:#.*)?$""")
+
+
+def _project_table_fallback(text: str) -> dict | None:
+    """Read ``[project].name`` when no TOML library is installed."""
+    table = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            table = line[1:-1].strip()
+            continue
+        if table != "project":
+            continue
+        match = _NAME_LINE.match(line)
+        if match:
+            return {"project": {"name": match.group(2)}}
+    return None
+
+
+def _project_name(pyproject: Path) -> str | None:
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    data = _load_toml(text)
+    if not isinstance(data, dict):
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    name = project.get("name")
+    if not isinstance(name, str):
+        return None
+    return name.strip() or None
+
+
+def _is_checkout(path: Path) -> bool:
+    """True when ``path`` is a real ``homenet-cli`` checkout, not a symlink."""
+    if path.name != CHECKOUT_DIR_NAME or _is_symlink(path):
+        return False
+    pyproject = path / "pyproject.toml"
+    try:
+        info = os.lstat(pyproject)
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return False
+    return _project_name(pyproject) == DIST_NAME
+
+
+def find_source_checkouts(home: Path) -> tuple[Path, ...]:
+    """Source checkouts strictly inside ``home``.
+
+    Uses :func:`os.walk` with ``followlinks=False``. Does not descend into
+    symbolic links, hidden directories other than ``<home>/.local``,
+    :data:`SKIP_DIR_NAMES`, or a directory that already matched.
+    """
+    root = Path(os.path.abspath(os.fspath(home)))
+    # os.path.isdir follows a symlink at the start. os.walk still will not
+    # descend into symlinks below it (followlinks=False).
+    if not os.path.isdir(root):
+        return ()
+    found: list[Path] = []
+    for dirpath, dirnames, _filenames in os.walk(root, topdown=True, followlinks=False):
+        current = Path(dirpath)
+        try:
+            depth = len(current.relative_to(root).parts)
+        except ValueError:
+            dirnames[:] = []
+            continue
+        if depth >= CHECKOUT_MAX_DEPTH:
+            dirnames[:] = []
+            continue
+        kept: list[str] = []
+        for name in list(dirnames):
+            if depth + 1 > CHECKOUT_MAX_DEPTH:
+                continue
+            child = current / name
+            if _is_symlink(child) or _skipped_dirname(name, depth):
+                continue
+            if name == CHECKOUT_DIR_NAME and _is_checkout(child) and _safe_directory(child, root):
+                found.append(child)
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+    return tuple(found)
+
+
+def _has_git_dir(path: Path) -> bool:
+    try:
+        os.lstat(path / ".git")
     except OSError:
         return False
     return True
 
 
+class _GitUnavailable(Exception):
+    """``git`` is not installed."""
+
+
+def _git(
+    checkout: Path, args: tuple[str, ...], purpose: str
+) -> subprocess.CompletedProcess[str] | None:
+    """Run git in ``checkout``. None means the command failed. Missing git raises."""
+    command = Command(("git", "-C", os.fspath(checkout), *args), purpose)
+    try:
+        return run_command(command, GIT_TIMEOUT)
+    except FileNotFoundError as exc:
+        raise _GitUnavailable from exc
+    except (subprocess.TimeoutExpired, PermissionError, OSError):
+        return None
+
+
+def _positive_count(text: str) -> bool:
+    value = text.strip()
+    return value.isdigit() and int(value) > 0
+
+
+def _checkout_warnings(path: Path) -> tuple[str, ...]:
+    """Uncommitted or unpushed work. Empty when git is missing or the tree is clean."""
+    if not _has_git_dir(path):
+        return ()
+    warnings: list[str] = []
+    try:
+        status = _git(
+            path,
+            ("status", "--porcelain"),
+            "check whether the source checkout has uncommitted changes",
+        )
+    except _GitUnavailable:
+        return ()
+    if status is None:
+        warnings.append("could not check for uncommitted changes")
+    elif status.returncode == 0 and status.stdout.strip():
+        warnings.append("uncommitted changes")
+    try:
+        ahead = _git(
+            path,
+            ("rev-list", "--count", "@{upstream}..HEAD"),
+            "check whether the source checkout has unpushed commits",
+        )
+    except _GitUnavailable:
+        return tuple(warnings)
+    if ahead is None:
+        warnings.append("could not check for unpushed commits")
+        return tuple(warnings)
+    if ahead.returncode == 0:
+        if _positive_count(ahead.stdout):
+            warnings.append("unpushed commits")
+        return tuple(warnings)
+    try:
+        local = _git(
+            path,
+            ("rev-list", "--count", "HEAD", "--not", "--remotes"),
+            "check whether the source checkout has commits that are not on a remote",
+        )
+    except _GitUnavailable:
+        return tuple(warnings)
+    if local is not None and local.returncode == 0 and _positive_count(local.stdout):
+        warnings.append("unpushed commits")
+    return tuple(warnings)
+
+
+def _planned_data(environ: Mapping[str, str], home: Path) -> tuple[Path | None, Path | None]:
+    """The data directory and baseline file, or ``(None, None)`` when unsafe."""
+    directory = data_dir(environ, home)
+    root_dir = Path(os.path.abspath(os.sep))
+    if directory.name != "homenet":
+        return None, None
+    if _same_path(directory, home) or _same_path(directory, root_dir):
+        return None, None
+    if _same_path(directory, directory.parent):
+        return None, None
+    if not _safe_directory(directory, home):
+        return None, None
+    baseline = directory / BASELINE_FILENAME
+    try:
+        info = os.lstat(baseline)
+    except OSError:
+        return directory, None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return directory, None
+    return directory, baseline
+
+
+def plan_purge(environ: Mapping[str, str] | None = None, home: Path | None = None) -> PurgePlan:
+    """List the data directory and source checkouts ``--purge`` may delete.
+
+    Runs nothing except ``git`` status checks for checkouts that are git
+    repositories. When ``git`` is missing, those checks are skipped.
+    """
+    env = os.environ if environ is None else environ
+    root = _home_from_env(env, home)
+    if root is None:
+        return PurgePlan(None, None, None, (), HOME_UNSET_MESSAGE)
+    directory, baseline = _planned_data(env, root)
+    checkouts = tuple(
+        SourceCheckout(path, _checkout_warnings(path)) for path in find_source_checkouts(root)
+    )
+    return PurgePlan(root, directory, baseline, checkouts, None)
+
+
+def _reraise_rmtree(func: object, path: object, exc: BaseException) -> None:
+    raise exc
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a real directory. A symlink root is refused before ``rmtree``."""
+    if not os.path.isabs(os.fspath(path)):
+        raise SelfInstallError(
+            f"{path} is not an absolute path, so it was not deleted.",
+            "homenet only deletes folders inside your home directory.",
+        )
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise SelfInstallError(
+            f"Could not delete {path}: {exc.strerror or exc}",
+            "Delete that folder yourself if you still want it gone.",
+        ) from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SelfInstallError(
+            f"{path} is not a real folder, so it was not deleted.",
+            "homenet does not follow symbolic links.",
+        )
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_reraise_rmtree)
+        else:
+            shutil.rmtree(path)
+    except OSError as exc:
+        raise SelfInstallError(
+            f"Could not delete {path}: {exc.strerror or exc}",
+            "Delete that folder yourself if you still want it gone.",
+        ) from exc
+
+
+def _refuse_outside(path: Path) -> None:
+    raise SelfInstallError(
+        f"{path} is outside the home directory or is a symbolic link, so it was not deleted.",
+        "homenet only deletes real folders inside your home directory.",
+    )
+
+
+def remove_data_dir(
+    path: Path,
+    *,
+    home: Path,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Delete the homenet data directory after containment and symlink checks.
+
+    ``path`` must be that directory itself (``.../homenet``), never a parent.
+    """
+    env = os.environ if environ is None else environ
+    root = _home_from_env(env, home)
+    if root is None:
+        raise SelfInstallError(HOME_UNSET_MESSAGE)
+    expected = data_dir(env, root)
+    not_the_data_dir = (
+        path.name != "homenet"
+        or not _same_path(path, expected)
+        or _same_path(path, expected.parent)
+        or _same_path(path, root)
+        or _same_path(path, Path(os.path.abspath(os.sep)))
+    )
+    if not_the_data_dir:
+        raise SelfInstallError(
+            f"{path} is not the homenet data folder, so it was not deleted.",
+            "homenet only deletes its own data folder, never a parent directory.",
+        )
+    if not _safe_directory(path, root):
+        _refuse_outside(path)
+    _remove_tree(path)
+
+
+def _holds_running_editable(checkout: Path) -> bool:
+    """True when this process is an editable install from ``checkout``."""
+    try:
+        dist = distribution(DIST_NAME)
+    except PackageNotFoundError:
+        return False
+    source = _editable_source(_direct_url(dist))
+    if not source:
+        return False
+    src = _realpath(Path(source))
+    root = _realpath(checkout)
+    if not src or not root:
+        return True
+    if src == root:
+        return True
+    try:
+        return os.path.commonpath([src, root]) == root
+    except ValueError:
+        return True
+
+
+def remove_checkout(path: Path, *, home: Path, environ: Mapping[str, str] | None = None) -> None:
+    """Delete one source checkout after the same checks as the search.
+
+    When the checkout holds the running editable install, raises
+    :class:`SelfInstallError` with the manual uninstall steps.
+    """
+    env = os.environ if environ is None else environ
+    root = _home_from_env(env, home)
+    if root is None:
+        raise SelfInstallError(HOME_UNSET_MESSAGE)
+    if path.name != CHECKOUT_DIR_NAME or not _is_checkout(path):
+        raise SelfInstallError(
+            f"{path} is not a homenet-cli source checkout, so it was not deleted.",
+            "homenet only deletes a folder named homenet-cli whose pyproject.toml "
+            "names homenet-cli.",
+        )
+    if not _safe_directory(path, root):
+        _refuse_outside(path)
+    if _holds_running_editable(path):
+        message, hint = _manual(KIND_EDITABLE, DIST_NAME, str(path))
+        raise SelfInstallError(message, hint)
+    _remove_tree(path)
+
+
 def purge_saved_data(
     environ: Mapping[str, str] | None = None, home: Path | None = None
 ) -> tuple[Path, ...]:
-    """Remove the baseline file and the homenet data directory.
+    """Remove the homenet data directory when the containment checks pass.
 
-    Returns the paths that were actually removed. A symlink at the data
-    directory is unlinked and its target is left alone. Raises
-    :class:`SelfInstallError` when a path cannot be deleted.
+    Does not search for or delete source checkouts. Returns the baseline file
+    (when it was a real file) and the directory. Returns an empty tuple when
+    ``HOME`` is unset, the directory is missing, or the path is refused.
+    Raises :class:`SelfInstallError` when a safe directory cannot be deleted.
     """
-    baseline, root = saved_data_paths(environ, home)
+    env = os.environ if environ is None else environ
+    root = _home_from_env(env, home)
+    if root is None:
+        return ()
+    directory, baseline = _planned_data(env, root)
+    if directory is None:
+        return ()
+    remove_data_dir(directory, home=root, environ=env)
     removed: list[Path] = []
-    try:
-        if root.is_symlink():
-            root.unlink()
-            return (root,)
-        had_file = baseline.is_file() or (baseline.is_symlink() and not root.is_dir())
-        if _safe_data_dir(root, baseline):
-            had_baseline = baseline.exists() or baseline.is_symlink()
-            shutil.rmtree(root)
-            if had_baseline:
-                removed.append(baseline)
-            removed.append(root)
-            return tuple(removed)
-        if had_file and baseline.parent == root:
-            baseline.unlink()
-            removed.append(baseline)
-    except OSError as exc:
-        raise SelfInstallError(
-            f"Could not delete saved data at {root}: {exc.strerror or exc}",
-            "Delete that folder yourself if you still want it gone.",
-        ) from exc
+    if baseline is not None:
+        removed.append(baseline)
+    removed.append(directory)
     return tuple(removed)
 
 
