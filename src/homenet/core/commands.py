@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess  # noqa: S404 - argument lists only, shell=False
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -65,14 +65,28 @@ def notify(cmd: Command) -> None:
         _hook(cmd)
 
 
-def run_command(cmd: Command, timeout: float) -> subprocess.CompletedProcess:
-    """Notify the hook, then run exactly ``cmd.argv`` (no shell)."""
+def run_command(
+    cmd: Command, timeout: float, env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Notify the hook, then run exactly ``cmd.argv`` (no shell).
+
+    ``env`` replaces the process environment when set. Callers that need a
+    scrubbed environment (git) pass one. Other commands inherit the current
+    environment.
+    """
     if cmd.kind != "exec":
         raise ValueError("not an exec command")
     notify(cmd)
-    return subprocess.run(  # noqa: S603 - argv from a build_*_command function
-        list(cmd.argv), capture_output=True, text=True, timeout=timeout, check=False, shell=False
-    )
+    kwargs: dict[str, object] = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "check": False,
+        "shell": False,
+    }
+    if env is not None:
+        kwargs["env"] = dict(env)
+    return subprocess.run(list(cmd.argv), **kwargs)  # noqa: S603 - argv from Command
 
 
 def emit(callback: Callable[..., None] | None, *args: object) -> None:

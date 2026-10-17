@@ -20,9 +20,14 @@ address is labeled as the router.
 venv, pipx, or user-site install, :func:`homenet.core.selfinstall.run_uninstall`.
 It prints that command with :meth:`~homenet.core.commands.Command.display`
 before running it. ``--yes`` skips the y/N question. With no terminal and no
-``--yes``, it refuses instead of waiting. ``--purge`` deletes the baseline
-file and data directory from :func:`homenet.core.baseline.default_baseline_path`
-only after that same yes. A system, editable, or unknown install is not touched.
+``--yes``, it refuses instead of waiting. ``--purge`` lists ``baseline.json``
+and any source checkouts from :func:`homenet.core.selfinstall.plan_purge`
+before it asks. Other names in the data folder are kept and listed. ``--yes``
+covers deleting ``baseline.json`` only. Deleting a source checkout always
+requires the user to type yes, and only when that checkout is a pristine git
+repository. With no terminal, checkouts are left in place. A system, editable,
+or unknown install is not touched, including when a checkout holds the running
+editable install.
 The home network scans come from core. This module does not spawn commands
 or read ``/sys``. ``devices`` labels this computer from the
 :class:`~homenet.core.netinfo.NetInfo` core already collected, including ``mac``.
@@ -388,8 +393,22 @@ _COMMANDS: tuple[_Command, ...] = (
         "Pass --yes to skip it. When this is not an interactive terminal, --yes is "
         "required so homenet does not wait for an answer.\n"
         "\n"
-        "The saved device snapshot is kept unless you pass --purge. homenet lists that "
-        "file and its folder before it deletes them, and the same yes covers both.\n"
+        "The saved device snapshot is kept unless you pass --purge. --purge deletes "
+        "baseline.json from the homenet data folder, then removes that folder only "
+        "when nothing else is in it. Any other name is left in place and listed. "
+        "A source checkout under your home directory is deleted only when it is "
+        "named homenet-cli, its pyproject.toml names homenet-cli, and it is a clean "
+        "git repository: no local changes, untracked or ignored files, stash, "
+        "unpushed commits, missing upstream, git config beyond a normal clone "
+        "(core.bare must be false), a non-empty info/attributes file, a filter "
+        "or diff attribute, a linked git directory, or a mount inside it. "
+        "homenet lists every path first. --yes covers the uninstall and baseline.json "
+        "only. Deleting a checkout always requires you to type yes. With no "
+        "terminal, checkouts are left in place.\n"
+        "\n"
+        "homenet does not follow symbolic links, and it will not delete your home "
+        "directory, /, or anything outside your home. If HOME is unset or empty, it "
+        "deletes no files.\n"
         "\n"
         "A system package, an editable checkout, or an install homenet does not "
         "recognize is left alone. homenet prints the command to run yourself and exits 1.\n"
@@ -773,33 +792,104 @@ def _stdin_is_tty() -> bool:
         return False
 
 
+_CHECKOUT_PROMPT = "Type yes to delete source checkouts: "
+_TTY_CHECKOUT_NOTE = (
+    "Source checkouts were kept because this is not an interactive terminal. "
+    "homenet deletes them only after you type yes."
+)
+_KEPT_CHECKOUT_NOTE = "Source checkouts were kept."
+
+
+def _ask(args: argparse.Namespace, prompt: str) -> str:
+    """Read one line. EOF and Ctrl-C count as an empty answer."""
+    if getattr(args, "json", False):
+        print(prompt, file=sys.stderr, end="", flush=True)
+        try:
+            return sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return ""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
 def _confirm_uninstall(args: argparse.Namespace, prompt: str) -> bool:
     """True for yes. ``--yes`` skips the question. Anything else, including empty, is no."""
     if getattr(args, "yes", False):
         return True
+    return _ask(args, prompt).strip().lower() in {"y", "yes"}
+
+
+def _confirm_checkouts(args: argparse.Namespace) -> bool:
+    """True only when the user types yes. ``--yes`` does not skip this question."""
+    return _ask(args, _CHECKOUT_PROMPT).strip().lower() == "yes"
+
+
+def _print_uninstall_preview(args: argparse.Namespace, text: str, *, show_on_stderr: bool) -> None:
     if getattr(args, "json", False):
-        print(prompt, file=sys.stderr, end="")
-        try:
-            answer = sys.stdin.readline()
-        except EOFError:
-            answer = ""
-    else:
-        try:
-            answer = input(prompt)
-        except EOFError:
-            answer = ""
-    return answer.strip().lower() in {"y", "yes"}
+        if show_on_stderr:
+            print(text, file=sys.stderr)
+            print(file=sys.stderr)
+        return
+    print(text)
+    print()
+
+
+def _checkout_groups(
+    plan: selfinstall.PurgePlan | None,
+) -> tuple[tuple[selfinstall.SourceCheckout, ...], tuple[tuple[str, str], ...]]:
+    """Pristine checkouts, and kept checkouts as ``(path, reason)``."""
+    if plan is None or plan.blocked:
+        return (), ()
+    offer = tuple(item for item in plan.checkouts if item.deletable)
+    kept = tuple(
+        (str(item.path), item.reason or "could not be checked; delete it yourself")
+        for item in plan.checkouts
+        if not item.deletable
+    )
+    return offer, kept
+
+
+def _json_checkouts(
+    offer: tuple[selfinstall.SourceCheckout, ...],
+    kept: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str | None], ...]:
+    pristine = tuple((str(item.path), None) for item in offer)
+    refused = tuple((path, reason) for path, reason in kept)
+    return pristine + refused
 
 
 def _run_uninstall(args: argparse.Namespace) -> int:
-    """Confirm, then uninstall. Prompts and printing stay here; core runs the command."""
+    """Confirm, then uninstall. Prompts and printing stay here; core deletes files."""
     info = selfinstall.detect_install()
     if info.command is None:
+        # Editable, system, and unknown installs, including a checkout that holds
+        # the running editable install, stop here with the manual steps.
         return _fail_message(args, info.message, info.hint)
-    paths = selfinstall.saved_data_paths()
-    path_text = tuple(str(path) for path in paths)
+    kept = selfinstall.saved_data_paths()
+    kept_text = tuple(str(path) for path in kept)
     display = _clean(info.command.display()) or ""
     purge = bool(getattr(args, "purge", False))
+    plan = selfinstall.plan_purge() if purge else None
+    data_paths: list[str] = []
+    note: str | None = None
+    preview_left: tuple[str, ...] = ()
+    preview_dir: str | None = None
+    if plan is not None:
+        if plan.blocked:
+            note = plan.blocked
+        else:
+            if plan.baseline is not None:
+                data_paths.append(str(plan.baseline))
+            if plan.remove_data_directory and plan.data_dir is not None:
+                data_paths.append(str(plan.data_dir))
+            preview_left = plan.data_left
+            if plan.data_left and plan.data_dir is not None:
+                preview_dir = str(plan.data_dir)
+    offer, kept_checkouts = _checkout_groups(plan)
     if not getattr(args, "yes", False) and not _stdin_is_tty():
         extra = " --purge" if purge else ""
         return _fail_message(
@@ -807,14 +897,33 @@ def _run_uninstall(args: argparse.Namespace) -> int:
             "homenet will not uninstall without a yes, and this is not an interactive terminal.",
             f"Re-run with --yes to uninstall without a prompt: `homenet uninstall --yes{extra}`.",
         )
-    if not getattr(args, "json", False):
-        print(
-            format_uninstall_preview(info.distribution, info.kind, display, path_text, purge=purge)
-        )
-        print()
+    if offer and not _stdin_is_tty():
+        skipped = tuple((str(item.path), _TTY_CHECKOUT_NOTE) for item in offer)
+        kept_checkouts = skipped + kept_checkouts
+        offer = ()
+    interactive_checkout = bool(offer)
+    preview_paths = tuple(data_paths) if purge else kept_text
+    preview = format_uninstall_preview(
+        info.distribution,
+        info.kind,
+        display,
+        preview_paths,
+        purge=purge,
+        remove_checkouts=tuple(str(item.path) for item in offer),
+        kept_checkouts=kept_checkouts,
+        kept_data=preview_left,
+        data_dir=preview_dir,
+        purge_note=note,
+    )
+    _print_uninstall_preview(
+        args,
+        preview,
+        show_on_stderr=(not getattr(args, "yes", False)) or interactive_checkout,
+    )
     prompt = (
         "Uninstall homenet and delete saved data? [y/N] " if purge else "Uninstall homenet? [y/N] "
     )
+    json_checkouts = _json_checkouts(offer, kept_checkouts)
     if not _confirm_uninstall(args, prompt):
         if getattr(args, "json", False):
             _print_ok(
@@ -822,44 +931,91 @@ def _run_uninstall(args: argparse.Namespace) -> int:
                 format_uninstall_json(
                     distribution=info.distribution,
                     kind=info.kind,
-                    paths=path_text,
+                    paths=kept_text,
                     removed=(),
                     purge=False,
                     cancelled=True,
                     uninstalled=False,
+                    checkouts=json_checkouts,
+                    data_left=preview_left,
                 ),
             )
         else:
             print(format_uninstall_cancelled())
         return 0
+    delete_checkouts = False
+    if interactive_checkout:
+        if _confirm_checkouts(args):
+            delete_checkouts = True
+        else:
+            note = _KEPT_CHECKOUT_NOTE
     try:
         selfinstall.run_uninstall(info.command)
     except selfinstall.SelfInstallError as exc:
-        where = _clean(path_text[0]) if path_text else ""
-        note = "Saved data was not removed." if purge else f"Saved data was kept at {where}."
-        hint = f"{exc.hint} {note}" if exc.hint else note
+        where = _clean(kept_text[0]) if kept_text else ""
+        extra = "Saved data was not removed." if purge else f"Saved data was kept at {where}."
+        hint = f"{exc.hint} {extra}" if exc.hint else extra
         return _fail_message(args, str(exc), hint)
     removed: tuple[str, ...] = ()
-    if purge:
+    left_names: tuple[str, ...] = ()
+    left_dir: str | None = None
+    if (
+        plan is not None
+        and plan.blocked is None
+        and plan.home is not None
+        and plan.data_dir is not None
+        and plan.data_identity is not None
+    ):
         try:
-            removed = tuple(str(path) for path in selfinstall.purge_saved_data())
+            outcome = selfinstall.remove_data_dir(
+                plan.data_dir, home=plan.home, identity=plan.data_identity
+            )
         except selfinstall.SelfInstallError as exc:
             return _fail(args, exc)
+        removed = tuple(str(path) for path in outcome.removed)
+        if outcome.left:
+            left_names = outcome.left
+            left_dir = str(outcome.directory)
+    removed_checkouts: list[str] = []
+    if delete_checkouts and plan is not None and plan.home is not None:
+        for item in offer:
+            if item.identity is None:
+                continue
+            try:
+                selfinstall.remove_checkout(item.path, home=plan.home, identity=item.identity)
+            except selfinstall.SelfInstallError as exc:
+                return _fail(args, exc)
+            removed_checkouts.append(str(item.path))
     if getattr(args, "json", False):
         _print_ok(
             args,
             format_uninstall_json(
                 distribution=info.distribution,
                 kind=info.kind,
-                paths=path_text,
+                paths=kept_text,
                 removed=removed,
                 purge=purge,
                 cancelled=False,
                 uninstalled=True,
+                checkouts=json_checkouts,
+                removed_checkouts=tuple(removed_checkouts),
+                data_left=left_names,
             ),
         )
     else:
-        print(format_uninstall_result(info.distribution, path_text, removed, purge=purge))
+        print(
+            format_uninstall_result(
+                info.distribution,
+                kept_text,
+                removed,
+                purge=purge,
+                removed_checkouts=tuple(removed_checkouts),
+                kept_checkouts=kept_checkouts,
+                kept_data=left_names,
+                data_dir=left_dir,
+                note=note,
+            )
+        )
     return 0
 
 
@@ -1420,12 +1576,19 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
         parser.add_argument(
             "--yes",
             action="store_true",
-            help="Uninstall without asking. The default answer is no.",
+            help=(
+                "Uninstall without asking, and delete baseline.json when --purge is set. "
+                "Does not delete source checkouts; those still require typing yes."
+            ),
         )
         parser.add_argument(
             "--purge",
             action="store_true",
-            help="Also delete saved data (the baseline file and its folder) after you confirm.",
+            help=(
+                "Also delete baseline.json from the homenet data folder. The folder "
+                "itself is removed only when that leaves it empty. A pristine source "
+                "checkout is deleted only after you type yes."
+            ),
         )
     _add_verbose(parser)
     _add_show_cmd(parser, json=spec.json)
