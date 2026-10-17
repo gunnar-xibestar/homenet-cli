@@ -513,7 +513,7 @@ def test_new_devices_exit_codes(case, code, json_mode, capsys, monkeypatch):
             assert err["fix_hint"]
         else:
             assert captured.err == ""
-            assert captured.out.startswith(BANNER + "\n")
+            assert captured.out.startswith("·\n" * 2 + BANNER + "\n")
             assert "Fix:" in captured.out
         return
     report = diff_devices([LAPTOP], current)

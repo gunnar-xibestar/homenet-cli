@@ -422,7 +422,7 @@ def test_explain_bad_address_matches_the_real_command(argv, json_mode, capsys, n
         assert explained.out == "" and explained.err == real.err
         assert set(json.loads(explained.err)) == {"error", "fix_hint"}
     else:
-        assert real.out == f"{BANNER}\n\n{explained.out}"
+        assert real.out == "·\n" * 2 + f"{BANNER}\n\n{explained.out}"
         assert "Fix:" in explained.out and BANNER not in explained.out
 
 

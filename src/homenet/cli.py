@@ -32,24 +32,22 @@ traceback.
 ``--json`` prints the shapes documented in :mod:`homenet.output` to stdout,
 with no banner. Errors go to stderr as a JSON object with ``error`` and
 ``fix_hint``.
-Plain success stdout is wrapped with padding lines, so the next shell
-prompt has a gap above it: :data:`_LEADING_BLANK_LINES` before the command's
-output and :data:`_TRAILING_BLANK_LINES` after it. Each line is a single
-middle dot (U+00B7). When stdout's encoding is not UTF-8, each line is a
-plain ``.`` instead. ``--json`` does not add those lines. An error printed by
-:func:`_fail_message` does not either, whatever the exit code, so
-``new-devices`` still gets them when it finds changes and exits 1.
-``--help``, ``--version``, and usage errors leave argparse before the
-handler and stay unchanged. The five trailing lines always follow
-newline-terminated output. Blank lines already in that output are not the
-padding, so they do not reduce the five.
-
-The handler can print and then fail, so success is known only after it
-returns. ``main`` holds stdout until then and, on success, writes the leading
-lines, the held text, and the trailing lines. homenet never runs sudo or
-asks for a password. A ``sudo homenet ...`` prompt belongs to sudo and
-finishes before this process starts, so those two lines are the first stdout
-after it.
+Plain stdout gets padding lines of a single middle dot (U+00B7), or a
+plain ``.`` when stdout's encoding is not UTF-8. The stdout wrapper writes
+:data:`_LEADING_BLANK_LINES` of them immediately before the first write of a
+non-JSON run, so a scan banner is not held until the scan ends. If that
+first write is an error from :func:`_fail_message` (``args._failed`` is
+already set), the error is written with no leading lines. A banner printed
+before a later failure keeps the lines already shown. After the handler
+returns, :data:`_TRAILING_BLANK_LINES` follow the output, but not for
+``--json`` and not when :func:`_fail_message` ran. ``new-devices`` still
+gets both when it finds changes and exits 1. ``--help``, ``--version``, and
+usage errors leave argparse before the handler and stay unchanged. The five
+trailing lines always follow newline-terminated output. Blank lines already
+in that output are not the padding, so they do not reduce the five.
+homenet never runs sudo or asks for a password. A ``sudo homenet ...``
+prompt belongs to sudo and finishes before this process starts, so those
+two lines are the first stdout after it.
 
 On a terminal, a scan, sweep, HTTP check, Wi-Fi read, or DNS check shows a
 status line on stderr (a spinner and the elapsed time) and clears it when the
@@ -150,10 +148,11 @@ BANNER = "Only scan networks you own or have permission to scan."
 _FRAMES = ("|", "/", "-", "\\")
 _TICK = 0.1
 _STATS_EVERY = 5
-# Padding around plain success stdout, so the next shell prompt is not flush
-# with the last line. Two lines come before the command's output and five
-# after it. Each line is one middle dot (U+00B7), or "." when stdout's
-# encoding is not UTF-8.
+# Two padding lines before the first plain stdout write, and five after a run
+# that did not fail. Each line is one middle dot (U+00B7), or "." when
+# stdout's encoding is not UTF-8. A pure error (the first write is from
+# _fail_message) and --json skip the leading lines. Trailing lines are
+# skipped for --json and whenever _fail_message ran.
 _LEADING_BLANK_LINES = 2
 _TRAILING_BLANK_LINES = 5
 _USAGE_HINT = "Run `homenet --help`, or `homenet <command> --help`, to see the options."
@@ -1033,8 +1032,9 @@ def _fail_message(args: argparse.Namespace, message: str, hint: str | None, code
 
     ``code`` is 2 for ``new-devices`` failures and 1 for every other command.
     ``--show-cmd --json`` also includes the ``commands`` seen before the failure.
-    Sets ``args._failed`` so :func:`main` does not add leading or trailing
-    padding lines after this error.
+    Sets ``args._failed`` before printing, so a pure error (this is the first
+    stdout write) gets no leading padding, and :func:`main` adds no trailing
+    lines either. A banner already printed stays as it was.
     """
     args._failed = True
     if getattr(args, "json", False):
@@ -1405,38 +1405,38 @@ def _padding_lines(stream: TextIO, count: int) -> str:
 
 
 class _StdoutTail:
-    """Hold stdout until ``main`` knows whether the command succeeded.
+    """Forward stdout and remember whether it already ends with a newline.
 
-    ``main`` installs this around one command handler. Writes stay here
-    instead of going straight to the terminal: a handler can print a banner
-    and then fail, and the leading lines are only for success. Afterwards,
-    :meth:`leading` is :data:`_LEADING_BLANK_LINES` padding lines and
-    :meth:`padding` is :data:`_TRAILING_BLANK_LINES` lines, each a single
-    padding mark. The trailing lines are always written once the output ends
-    with a newline. Blank lines the handler already printed are not padding,
-    so they do not reduce the five.
+    ``main`` installs this around one command handler. Bytes are written
+    through immediately. The first non-empty write of a non-JSON run is
+    preceded by :data:`_LEADING_BLANK_LINES` padding lines, unless
+    ``args._failed`` is already set (the first print is an error from
+    :func:`_fail_message`). Afterwards, :meth:`padding` is
+    :data:`_TRAILING_BLANK_LINES` lines, each a single padding mark. Those
+    lines are always written once the output ends with a newline. Blank lines
+    the handler already printed are not padding, so they do not reduce the five.
     """
 
-    def __init__(self, stream: TextIO) -> None:
+    def __init__(self, stream: TextIO, args: argparse.Namespace) -> None:
         self._stream = stream
-        self._chunks: list[str] = []
+        self._args = args
+        self._opened = False
         self._ends_with_newline = False
         self._had_content = False
 
     def write(self, text: str) -> int:
-        self._chunks.append(text)
+        """Write ``text`` now. Leading lines go out before the first real write."""
+        if text and not self._opened:
+            self._opened = True
+            # _fail_message sets _failed before it prints, so a pure error
+            # is not padded. A banner printed earlier already took this branch.
+            if not getattr(self._args, "json", False) and not getattr(self._args, "_failed", False):
+                self._stream.write(_padding_lines(self._stream, _LEADING_BLANK_LINES))
+        written = self._stream.write(text)
         if text:
             self._had_content = True
             self._ends_with_newline = text.endswith("\n")
-        return len(text)
-
-    def held(self) -> str:
-        """The handler's stdout, unchanged."""
-        return "".join(self._chunks)
-
-    def leading(self) -> str:
-        """Two padding lines, written before the handler's stdout."""
-        return _padding_lines(self._stream, _LEADING_BLANK_LINES)
+        return written
 
     def padding(self) -> str:
         """Five padding lines, after a newline when the last line is unfinished.
@@ -1459,20 +1459,19 @@ class _StdoutTail:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI. Returns a process exit code.
 
-    After the command handler returns, plain success text on stdout is
-    preceded by :data:`_LEADING_BLANK_LINES` padding lines and followed by
-    :data:`_TRAILING_BLANK_LINES` padding lines. Each line is one middle dot,
-    or ``.`` when stdout's encoding is not UTF-8. The trailing lines are
-    always written once the output ends with a newline; blank lines already
-    there do not replace them. ``--json`` skips both, and so does a run that
-    printed an error through :func:`_fail_message`. The exit code does not
-    matter: ``new-devices`` exits 1 when it finds changes and still gets the
-    gap. ``--help``, ``--version``, and usage errors exit inside
-    ``parse_args`` and never reach this step.
-
-    The handler's bytes are held until that decision. They cannot be written
-    first: a failure can print, then set ``args._failed``, and leading lines
-    must not appear in that case.
+    The stdout wrapper writes :data:`_LEADING_BLANK_LINES` padding lines
+    immediately before the first write of a non-JSON run, unless that write
+    is an error from :func:`_fail_message`. After the handler returns, plain
+    text is followed by :data:`_TRAILING_BLANK_LINES` padding lines. Each
+    line is one middle dot, or ``.`` when stdout's encoding is not UTF-8.
+    The trailing lines are always written once the output ends with a
+    newline; blank lines already there do not replace them. ``--json`` skips
+    them, and so does a run that printed an error through
+    :func:`_fail_message`. The exit code does not matter: ``new-devices``
+    exits 1 when it finds changes and still gets the gap. ``--help``,
+    ``--version``, and usage errors exit inside ``parse_args`` and never
+    reach this step. Output is not buffered: a scan banner is visible before
+    the scan runs.
 
     ``BrokenPipeError`` (a reader such as ``head`` closed the pipe) exits 1
     with no traceback. Stdout is pointed at ``os.devnull`` first so the
@@ -1488,41 +1487,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     # A ``-v`` before the command and another after it are both real. Count the raw argv.
     args.verbose = _verbose_count(raw)
     stdout = sys.stdout
-    tail = _StdoutTail(stdout)
+    tail = _StdoutTail(stdout, args)
     sys.stdout = tail
-    released = False
     try:
         _capture_commands(args)
         code = int(args.handler(args))
-        # Leading lines, then the command's output, then trailing lines.
-        # JSON stays untouched, and so does stdout after _fail_message.
-        # The hold is required: _failed is set only while the handler runs.
+        # Trailing padding before the next shell prompt. Leading lines already
+        # went out, live, before the first write. JSON stays untouched, and so
+        # does stdout after _fail_message.
         if not getattr(args, "_failed", False) and not getattr(args, "json", False):
-            stdout.write(tail.leading())
-            stdout.write(tail.held())
             extra = tail.padding()
             if extra:
                 stdout.write(extra)
-        else:
-            stdout.write(tail.held())
-        released = True
         # A closed pipe must raise here, not while Python flushes at shutdown.
         stdout.flush()
         return code
     except BrokenPipeError:
         # Python flushes standard streams on exit; redirect remaining output
         # to devnull to avoid another BrokenPipeError at shutdown.
-        released = True
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         sys.exit(1)
     finally:
-        # A crash before the release still shows what the handler printed,
-        # with no padding. The normal paths above already wrote it.
-        if not released:
-            try:
-                stdout.write(tail.held())
-            except OSError:
-                pass
         sys.stdout = stdout
         set_command_hook(None)
