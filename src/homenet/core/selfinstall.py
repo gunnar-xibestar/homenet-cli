@@ -11,9 +11,10 @@ Saved data is the baseline path from :mod:`homenet.core.baseline`.
   The directory itself is removed only when that leaves it empty. Any other
   name is kept and reported.
 * a source checkout under the home directory, and only when it is a pristine
-  git repository: a real ``.git`` directory, no command-running git config,
-  no mount inside the tree, no stash, no local or ignored or untracked files,
-  and no unpushed commits on a configured upstream.
+  git repository: a real ``.git`` directory, no command-running git config
+  (including ``.git/config.worktree`` and ``extensions.worktreeConfig``), no
+  ``filter=`` or ``diff=`` attribute, no mount inside the tree, no stash, no
+  local or ignored or untracked files, and no unpushed commits on an upstream.
 
 A checkout is a directory named exactly ``homenet-cli`` whose ``pyproject.toml``
 has project name ``homenet-cli``. The search is :func:`os.walk` with
@@ -27,8 +28,10 @@ is not walked into.
 A path is deleted only when :func:`os.path.realpath` of it is strictly inside
 :func:`os.path.realpath` of ``HOME``. ``/``, the home directory itself, and
 anything outside home are refused. When ``HOME`` is unset or empty, nothing
-is deleted. Git config is read before ``git`` runs. A setting that can run a
-command refuses that checkout, and ``git`` is not started for it.
+is deleted. Git config and attributes are read before ``git`` runs. A
+setting or attribute that can run a command refuses that checkout, and
+``git`` is not started for it. The distribution name on the uninstall command
+is always ``homenet-cli``.
 """
 
 from __future__ import annotations
@@ -93,7 +96,6 @@ KIND_EDITABLE = "editable"
 KIND_UNKNOWN = "unknown"
 
 _AUTOMATIC = frozenset({KIND_VENV, KIND_PIPX, KIND_USER})
-_DIST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class SelfInstallError(Exception):
@@ -129,15 +131,6 @@ def _within(path: Path, root: Path) -> bool:
     except (ValueError, OSError):
         return False
     return True
-
-
-def _dist_name(dist: object) -> str:
-    metadata = getattr(dist, "metadata", None)
-    raw = metadata.get("Name") if metadata is not None and hasattr(metadata, "get") else None
-    text = clean_text(raw) or DIST_NAME
-    if _DIST_NAME.fullmatch(text):
-        return text
-    return DIST_NAME
 
 
 def _direct_url(dist: object) -> dict | None:
@@ -312,15 +305,14 @@ def detect_install(
         message, hint = _manual(KIND_UNKNOWN, DIST_NAME, None)
         return InstallInfo(KIND_UNKNOWN, DIST_NAME, None, message, hint)
 
-    dist_name = _dist_name(dist)
     kind, source = _classify(dist, prefix=prefix, base_prefix=base_prefix, environ=env)
     if kind == KIND_PIPX:
-        command = Command(("pipx", "uninstall", dist_name), f"uninstall {dist_name} with pipx")
-        return InstallInfo(kind, dist_name, command, "")
+        command = Command(("pipx", "uninstall", DIST_NAME), f"uninstall {DIST_NAME} with pipx")
+        return InstallInfo(kind, DIST_NAME, command, "")
     if kind in {KIND_VENV, KIND_USER}:
-        return InstallInfo(kind, dist_name, _pip_command(executable, dist_name, kind), "")
-    message, hint = _manual(kind, dist_name, source)
-    return InstallInfo(kind, dist_name, None, message, hint)
+        return InstallInfo(kind, DIST_NAME, _pip_command(executable, DIST_NAME, kind), "")
+    message, hint = _manual(kind, DIST_NAME, source)
+    return InstallInfo(kind, DIST_NAME, None, message, hint)
 
 
 def plan_uninstall() -> list[Command]:
@@ -672,11 +664,25 @@ def _strip_config_comment(line: str) -> str:
     return "".join(kept)
 
 
-def _section_name(header: str) -> str:
-    parts = header.split()
-    if not parts:
-        return ""
-    return parts[0].strip("\"'").lower()
+def _split_section(header: str) -> tuple[str, str]:
+    """``(family, subsection)``, both lowercased.
+
+    The family is the first dotted piece, so ``[filter.evil]`` and
+    ``[filter "evil"]`` are both the ``filter`` family. ``[Filter.Evil]``
+    matches the same way.
+    """
+    header = header.strip()
+    if not header:
+        return "", ""
+    token, _, rest = header.partition(" ")
+    family_token = token.strip("\"'").lower()
+    family, dotted, dotted_sub = family_token.partition(".")
+    quoted = rest.strip()
+    if len(quoted) >= 2 and quoted[0] == quoted[-1] and quoted[0] in "\"'":
+        return family, quoted[1:-1].lower()
+    if dotted:
+        return family, dotted_sub
+    return family, ""
 
 
 def _assignment_key(line: str) -> str:
@@ -686,17 +692,32 @@ def _assignment_key(line: str) -> str:
     return key[0].strip("\"'").lower()
 
 
-def _assignment_is_dangerous(section: str, line: str) -> bool:
-    """True for a git option that can run a command, including ``include``."""
+def _section_is_dangerous(family: str, subsection: str) -> bool:
+    """True when the section header itself names a command-running option."""
+    if family == "extensions" and subsection == "worktreeconfig":
+        return True
+    return family == "core" and subsection in _DANGEROUS_CORE
+
+
+def _assignment_is_dangerous(family: str, subsection: str, line: str) -> bool:
+    """True for a git option that can run a command, including ``include``.
+
+    ``family`` is the first dotted piece of the section name. ``include`` and
+    ``includeIf`` can load another file; that file is not read here.
+    ``extensions.worktreeConfig`` is refused whatever its value is.
+    """
+    if _section_is_dangerous(family, subsection):
+        return True
     key = _assignment_key(line)
     if not key:
         return False
-    # include and includeIf can load another file. That file is not read here.
-    if section in {"include", "includeif"} or section == "alias" or section == "filter":
+    if family in {"include", "includeif", "alias", "filter"}:
         return True
-    if section == "core" and key in _DANGEROUS_CORE:
+    if family == "extensions" and key == "worktreeconfig":
         return True
-    return section == "diff" and key in {"textconv", "command"}
+    if family == "core" and key in _DANGEROUS_CORE:
+        return True
+    return family == "diff" and key in {"textconv", "command"}
 
 
 def _config_is_dangerous(text: str) -> bool:
@@ -704,7 +725,7 @@ def _config_is_dangerous(text: str) -> bool:
 
     A continued line (a trailing backslash) is refused instead of parsed wrong.
     """
-    section = ""
+    family, subsection = "", ""
     for raw in text.splitlines():
         body = raw.lstrip()
         if raw.rstrip().endswith("\\") and body[:1] not in {"#", ";", ""}:
@@ -716,12 +737,14 @@ def _config_is_dangerous(text: str) -> bool:
             end = line.find("]")
             if end < 0:
                 return True
-            section = _section_name(line[1:end])
+            family, subsection = _split_section(line[1:end])
+            if _section_is_dangerous(family, subsection):
+                return True
             rest = line[end + 1 :].strip()
-            if rest and _assignment_is_dangerous(section, rest):
+            if rest and _assignment_is_dangerous(family, subsection, rest):
                 return True
             continue
-        if _assignment_is_dangerous(section, line):
+        if _assignment_is_dangerous(family, subsection, line):
             return True
     return False
 
@@ -757,14 +780,69 @@ def _read_nofollow(path: Path) -> tuple[bool, str] | None:
 
 
 def _config_can_run_command(checkout: Path) -> bool:
-    """True when ``.git/config`` must keep the checkout from running git."""
-    found = _read_nofollow(checkout / ".git" / "config")
-    if found is None:
+    """True when git config must keep the checkout from running git.
+
+    Both ``.git/config`` and ``.git/config.worktree`` are read. A missing
+    file is safe. A symlink or an unreadable file is not.
+    """
+    dangerous = False
+    for name in ("config", "config.worktree"):
+        found = _read_nofollow(checkout / ".git" / name)
+        if found is None:
+            return True
+        present, text = found
+        if present and _config_is_dangerous(text):
+            dangerous = True
+    return dangerous
+
+
+def _attributes_assign_command(text: str) -> bool:
+    """True when an attributes file sets ``filter=`` or ``diff=``."""
+    for raw in text.splitlines():
+        line = raw.strip().lower()
+        if not line or line.startswith("#"):
+            continue
+        if "filter=" in line or "diff=" in line:
+            return True
+    return False
+
+
+def _attributes_can_run_command(checkout: Path) -> bool:
+    """True when ``info/attributes`` or any ``.gitattributes`` can run a command.
+
+    Symlinks are not followed. A nested ``.gitattributes`` counts. ``.git``
+    itself is not walked; ``.git/info/attributes`` is read on its own.
+    """
+    info_attrs = _read_nofollow(checkout / ".git" / "info" / "attributes")
+    if info_attrs is None:
         return True
-    present, text = found
-    if not present:
-        return False
-    return _config_is_dangerous(text)
+    if info_attrs[0] and _attributes_assign_command(info_attrs[1]):
+        return True
+    try:
+        root_dev = os.lstat(checkout).st_dev
+    except OSError:
+        return True
+    for dirpath, dirnames, filenames in os.walk(checkout, topdown=True, followlinks=False):
+        current = Path(dirpath)
+        kept: list[str] = []
+        for name in dirnames:
+            if name == ".git":
+                continue
+            try:
+                info = os.lstat(current / name)
+            except OSError:
+                return True
+            if info.st_dev != root_dev:
+                return True
+            if not stat.S_ISLNK(info.st_mode):
+                kept.append(name)
+        dirnames[:] = kept
+        if ".gitattributes" not in filenames:
+            continue
+        found = _read_nofollow(current / ".gitattributes")
+        if found is None or (found[0] and _attributes_assign_command(found[1])):
+            return True
+    return False
 
 
 def _packed_has_stash(text: str) -> bool:
@@ -866,15 +944,16 @@ def _status_reason(text: str) -> str | None:
 def _checkout_reason(path: Path) -> str | None:
     """Why ``path`` must be kept. None means it is a pristine git checkout.
 
-    Git is not started when the repository config can run a command, when
-    ``.git`` is a file or a symlink, or when a stash ref is already on disk.
+    Git is not started when the repository config or an attributes file can
+    run a command, when ``.git`` is a file or a symlink, or when a stash ref
+    is already on disk.
     """
     reason = _git_dir_reason(path)
     if reason:
         return reason
     if _has_foreign_device(path):
         return _keep("has a mount inside it")
-    if _config_can_run_command(path):
+    if _config_can_run_command(path) or _attributes_can_run_command(path):
         return _keep("has custom git config")
     reason = _stash_on_disk(path)
     if reason:

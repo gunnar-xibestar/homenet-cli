@@ -170,6 +170,21 @@ def _safe_git(checkout: Path) -> None:
     (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
 
 
+def _filter_checkout(home: Path, config: str, worktree: str | None = None) -> list[Path]:
+    """A checkout whose clean filter would run ``touch PWNED`` if git started."""
+    checkout = _write_checkout(home / "homenet-cli")
+    git_dir = checkout / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(config, encoding="utf-8")
+    if worktree is not None:
+        (git_dir / "config.worktree").write_text(worktree, encoding="utf-8")
+    info = git_dir / "info"
+    info.mkdir()
+    (info / "attributes").write_text("* filter=evil\n", encoding="utf-8")
+    (checkout / "dirty.txt").write_text("changed\n", encoding="utf-8")
+    return [checkout, checkout / "keep.txt", checkout / "dirty.txt"]
+
+
 def _guard_deletes(monkeypatch, tmp_path: Path, forbidden: set[str]) -> None:
     """Fail the test if an absolute delete hits '/', a forbidden path, or outside tmp.
 
@@ -347,6 +362,14 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         refs.mkdir()
         (refs / "stash").write_text("0123456789abcdef0123456789abcdef01234567\n", encoding="utf-8")
         return [checkout, checkout / "keep.txt"]
+    if case == "worktree_config":
+        return _filter_checkout(
+            home,
+            "[extensions]\n\tworktreeConfig = true\n",
+            '[filter "evil"]\n\tclean = touch PWNED; cat\n',
+        )
+    if case == "filter_evil":
+        return _filter_checkout(home, "[filter.evil]\n\tclean = touch PWNED; cat\n")
     if case == "bind_mount":
         checkout = _write_checkout(home / "homenet-cli")
         _safe_git(checkout)
@@ -379,6 +402,8 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         "monorepo",
         "fsmonitor",
         "stash",
+        "worktree_config",
+        "filter_evil",
         "bind_mount",
     ],
 )
@@ -442,6 +467,13 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
         if case == "stash":
             assert "has a stash" in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+        if case in {"worktree_config", "filter_evil"}:
+            assert "has custom git config" in captured.out
+            assert not (tmp_path / "home" / "homenet-cli" / "PWNED").exists()
+            ran = "\n".join(" ".join(argv) for argv, _kwargs in calls)
+            assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+            assert "touch" not in ran
+            assert "PWNED" not in ran
         if case == "bind_mount":
             assert "has a mount inside it" in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
