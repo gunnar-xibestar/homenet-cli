@@ -1,4 +1,8 @@
-"""homenet uninstall. The subprocess is mocked; nothing real is removed."""
+"""homenet uninstall. The purge's subprocess is mocked; nothing real is removed.
+
+Fixture setup runs real ``git init``, commit, and clone. That git is restored
+to the mock before the command under test.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,10 @@ import pytest
 from homenet.cli import main
 from homenet.core import selfinstall
 from homenet.core.commands import Command
+
+# Saved before the autouse fixture replaces subprocess. Fixture setup calls real git.
+_REAL_RUN = subprocess.run
+_REAL_POPEN = subprocess.Popen
 
 _DIST = "homenet-cli"
 
@@ -166,23 +174,87 @@ def _write_checkout(path: Path) -> Path:
     return path
 
 
+def _git_setup_env() -> dict[str, str]:
+    """Environment for fixture git. Inherited GIT_* and the user config are not used."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_AUTHOR_NAME"] = "homenet"
+    env["GIT_AUTHOR_EMAIL"] = "homenet@example.com"
+    env["GIT_COMMITTER_NAME"] = "homenet"
+    env["GIT_COMMITTER_EMAIL"] = "homenet@example.com"
+    return env
+
+
+def _git(cwd: Path, *args: str) -> None:
+    """Run real git while building a fixture. The purge itself still uses the mock."""
+    saved_run = subprocess.run
+    saved_popen = subprocess.Popen
+    subprocess.run = _REAL_RUN
+    subprocess.Popen = _REAL_POPEN
+    try:
+        completed = _REAL_RUN(  # noqa: S603
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "user.name=homenet",
+                "-c",
+                "user.email=homenet@example.com",
+                *args,
+            ],
+            cwd=cwd,
+            env=_git_setup_env(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        subprocess.run = saved_run
+        subprocess.Popen = saved_popen
+    if completed.returncode != 0:
+        detail = completed.stderr or completed.stdout
+        raise AssertionError(detail)
+
+
 def _safe_git(checkout: Path) -> None:
-    """A real .git directory whose config does not run a command."""
-    git_dir = checkout / ".git"
-    git_dir.mkdir()
-    (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    """``git init`` and one commit, so ``.git/config`` is what git actually writes."""
+    _git(checkout, "init")
+    _git(checkout, "add", "pyproject.toml", "keep.txt")
+    _git(checkout, "commit", "-m", "init")
+
+
+def _append_config(checkout: Path, text: str) -> None:
+    path = checkout / ".git" / "config"
+    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def _clone_checkout(home: Path, tmp_path: Path) -> Path:
+    """Init, commit, and clone from a local bare remote. The clone is under ``home``."""
+    seed = _write_checkout(tmp_path / "seed")
+    _safe_git(seed)
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "clone", "--bare", os.fspath(seed), os.fspath(origin))
+    checkout = home / "homenet-cli"
+    _git(tmp_path, "clone", os.fspath(origin), os.fspath(checkout))
+    return checkout
 
 
 def _filter_checkout(home: Path, config: str, worktree: str | None = None) -> list[Path]:
-    """A checkout whose clean filter would run ``touch PWNED`` if git started."""
+    """A real repository whose config would run ``touch PWNED`` if git started."""
     checkout = _write_checkout(home / "homenet-cli")
-    git_dir = checkout / ".git"
-    git_dir.mkdir()
-    (git_dir / "config").write_text(config, encoding="utf-8")
+    _safe_git(checkout)
+    _append_config(checkout, config)
     if worktree is not None:
-        (git_dir / "config.worktree").write_text(worktree, encoding="utf-8")
-    info = git_dir / "info"
-    info.mkdir()
+        (checkout / ".git" / "config.worktree").write_text(worktree, encoding="utf-8")
+    info = checkout / ".git" / "info"
+    info.mkdir(exist_ok=True)
     (info / "attributes").write_text("* filter=evil\n", encoding="utf-8")
     (checkout / "dirty.txt").write_text("changed\n", encoding="utf-8")
     return [checkout, checkout / "keep.txt", checkout / "dirty.txt"]
@@ -354,16 +426,14 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         return [checkout, team / "secret.txt"]
     if case == "fsmonitor":
         checkout = _write_checkout(home / "homenet-cli")
-        git_dir = checkout / ".git"
-        git_dir.mkdir()
-        (git_dir / "config").write_text("[core]\n\tfsmonitor = touch PWNED\n", encoding="utf-8")
+        _safe_git(checkout)
+        _append_config(checkout, "[core]\n\tfsmonitor = touch PWNED\n")
         return [checkout, checkout / "keep.txt"]
     if case == "stash":
         checkout = _write_checkout(home / "homenet-cli")
         _safe_git(checkout)
-        refs = checkout / ".git" / "refs"
-        refs.mkdir()
-        (refs / "stash").write_text("0123456789abcdef0123456789abcdef01234567\n", encoding="utf-8")
+        (checkout / "keep.txt").write_text("stashed\n", encoding="utf-8")
+        _git(checkout, "stash", "push", "-m", "wip")
         return [checkout, checkout / "keep.txt"]
     if case == "worktree_config":
         return _filter_checkout(
@@ -375,17 +445,24 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         return _filter_checkout(home, "[filter.evil]\n\tclean = touch PWNED; cat\n")
     if case == "core_worktree":
         checkout = _write_checkout(home / "homenet-cli")
+        _safe_git(checkout)
         sibling = home / "clean-clone"
         sibling.mkdir()
         (sibling / "README").write_text("clean\n", encoding="utf-8")
-        git_dir = checkout / ".git"
-        git_dir.mkdir()
-        (git_dir / "config").write_text(
-            f"[core]\n\tworktree = {sibling}\n",
-            encoding="utf-8",
-        )
+        _append_config(checkout, f"[core]\n\tworktree = {sibling}\n")
         (checkout / "untracked.txt").write_text("keep\n", encoding="utf-8")
         return [checkout, checkout / "untracked.txt"]
+    if case == "pristine_clone":
+        _clone_checkout(home, tmp_path)
+        return [tmp_path / "seed" / "keep.txt", tmp_path / "origin.git" / "config"]
+    if case == "commondir":
+        checkout = _clone_checkout(home, tmp_path)
+        other = _write_checkout(tmp_path / "filtered-git")
+        _safe_git(other)
+        _append_config(other, '[filter "evil"]\n\tclean = touch PWNED; cat\n')
+        common = os.path.relpath(other / ".git", checkout / ".git")
+        (checkout / ".git" / "commondir").write_text(common + "\n", encoding="utf-8")
+        return [checkout, checkout / "keep.txt", other / "keep.txt"]
     if case == "bind_mount":
         checkout = _write_checkout(home / "homenet-cli")
         _safe_git(checkout)
@@ -421,6 +498,8 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         "worktree_config",
         "filter_evil",
         "core_worktree",
+        "pristine_clone",
+        "commondir",
         "bind_mount",
     ],
 )
@@ -492,6 +571,16 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case in {"worktree_config", "filter_evil"}:
             assert "has custom git config" in captured.out
+            assert not (tmp_path / "home" / "homenet-cli" / "PWNED").exists()
+            ran = "\n".join(" ".join(argv) for argv, _kwargs in calls)
+            assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+            assert "touch" not in ran
+            assert "PWNED" not in ran
+        if case == "pristine_clone":
+            assert not (tmp_path / "home" / "homenet-cli").exists()
+            assert any(argv and argv[0] == "git" for argv, _kwargs in calls)
+        if case == "commondir":
+            assert "has a linked git directory" in captured.out
             assert not (tmp_path / "home" / "homenet-cli" / "PWNED").exists()
             ran = "\n".join(" ".join(argv) for argv, _kwargs in calls)
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
