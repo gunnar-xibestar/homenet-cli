@@ -11,14 +11,19 @@ Saved data is the baseline path from :mod:`homenet.core.baseline`.
   The directory itself is removed only when that leaves it empty. Any other
   name is kept and reported.
 * a source checkout under the home directory, and only when it is a pristine
-  git repository: a real ``.git`` directory, and only the config keys a normal
-  clone writes (``core.bare`` must be false; ``.git/config.worktree`` is held
-  to the same list). Any other section or key, ``include`` / ``includeIf``,
-  or a value that does not parse keeps it. So does ``.git/commondir``,
+  git repository: a real ``.git`` directory, and only allowlisted config
+  (``core.bare`` must be false; ``.git/config.worktree`` is held to the same
+  list). The list is the keys a normal clone writes, plus branch, remote,
+  pull, fetch, and push policy that cannot run a command or point at another
+  path, and ``init.defaultbranch``, ``user.name``, and ``user.email``.
+  Any other section or key, ``include`` / ``includeIf``, or a value that does
+  not parse keeps it. So does ``.git/commondir``,
   ``.git/gitdir``, ``.git/objects/info/alternates``, content in
   ``.git/info/attributes`` beyond whitespace and comments, a ``filter=`` or
   ``diff=`` line in ``.gitattributes``, a mount inside the tree, a stash,
   local or ignored or untracked files, or unpushed commits on an upstream.
+  A config refusal names the first offending key and not its value, and names
+  ``config.worktree`` when that file has the key.
 
 A checkout is a directory named exactly ``homenet-cli`` whose ``pyproject.toml``
 has project name ``homenet-cli``. The search is :func:`os.walk` with
@@ -85,7 +90,9 @@ HOME_UNSET_MESSAGE = (
 # Names homenet itself writes. Anything else in the data directory is kept.
 DATA_FILE_NAMES = frozenset({BASELINE_FILENAME})
 _CONFIG_READ_LIMIT = 1024 * 1024
-# Keys a plain ``git init`` / ``git clone`` writes. Anything else is refused.
+# Clone bookkeeping. These booleans only record how the filesystem and refs
+# behave. core keys that name a path, a program, a hook, or attributes are
+# not in this set.
 _CORE_BOOL_KEYS = frozenset(
     {
         "filemode",
@@ -94,8 +101,33 @@ _CORE_BOOL_KEYS = frozenset(
         "precomposeunicode",
     }
 )
-_REMOTE_KEYS = frozenset({"url", "fetch"})
-_BRANCH_KEYS = frozenset({"remote", "merge"})
+# Where this remote fetches and pushes, and whether a fetch prunes or skips
+# it. url, fetch, and pushurl are location strings, not programs. tagopt is
+# only the --tags / --no-tags switch. promisor and partialclonefilter are
+# absent because those make status fetch.
+_REMOTE_STRING_KEYS = frozenset({"url", "fetch", "pushurl"})
+_REMOTE_BOOL_KEYS = frozenset({"prune", "skipdefaultupdate"})
+_REMOTE_TAGOPT_KEY = "tagopt"
+# How a branch merges, rebases, and which remote it pushes to, plus a
+# description string. None of these names a program, a path, or a work tree.
+_BRANCH_STRING_KEYS = frozenset({"remote", "merge", "pushremote", "description"})
+_BRANCH_REBASE_KEY = "rebase"
+# pull.rebase and pull.ff only choose merge versus rebase and fast-forward.
+_PULL_KEYS = frozenset({"rebase", "ff"})
+# fetch.prune only drops stale remote-tracking refs when a fetch runs.
+_FETCH_KEYS = frozenset({"prune"})
+# What a push with no refspec updates, and whether that push sets upstream.
+_PUSH_KEYS = frozenset({"default", "autosetupremote"})
+# The branch name ``git init`` would create. It is not a directory.
+_INIT_KEYS = frozenset({"defaultbranch"})
+# Identity strings stored on a commit. They are not commands or paths.
+_USER_KEYS = frozenset({"name", "email"})
+# Documented non-boolean values of branch.<name>.rebase and pull.rebase.
+_REBASE_WORDS = frozenset({"merges", "m", "interactive", "i", "preserve", "p"})
+_TAGOPT_VALUES = frozenset({"--tags", "--no-tags"})
+_PUSH_DEFAULT_VALUES = frozenset(
+    {"nothing", "current", "upstream", "tracking", "simple", "matching"}
+)
 _GIT_BOOL_TRUE = frozenset({"true", "yes", "on", "1"})
 _GIT_BOOL_FALSE = frozenset({"false", "no", "off", "0"})
 _LINKED_GIT_PARTS = (
@@ -820,75 +852,215 @@ def _core_value_allowed(key: str, raw: str | None) -> bool:
         return value is not None and _git_bool(value) is False
     if key not in _CORE_BOOL_KEYS:
         return False
-    if raw is None:
-        return True
-    value = _unescape_config_value(raw)
-    return value is not None and _git_bool(value) is not None
+    return _bool_value_allowed(raw)
 
 
 def _string_value_allowed(raw: str | None) -> bool:
     return raw is not None and _unescape_config_value(raw) is not None
 
 
-def _assignment_allowed(family: str, line: str) -> bool:
-    """True when ``line`` is an allowed key in ``family`` and its value parses."""
-    parts = _assignment_parts(line)
-    if parts is None:
+def _bool_value_allowed(raw: str | None) -> bool:
+    """True for git's boolean, including the shorthand of a missing value."""
+    if raw is None:
+        return True
+    value = _unescape_config_value(raw)
+    return value is not None and _git_bool(value) is not None
+
+
+def _choice_value_allowed(raw: str | None, choices: frozenset[str]) -> bool:
+    """True when the value parses and is one of ``choices``, ignoring case."""
+    if raw is None:
         return False
-    key, raw = parts
+    value = _unescape_config_value(raw)
+    return value is not None and value.strip().lower() in choices
+
+
+def _rebase_value_allowed(raw: str | None) -> bool:
+    """A git boolean, or merges / interactive / preserve and their one-letter forms."""
+    if raw is None:
+        return True
+    value = _unescape_config_value(raw)
+    if value is None:
+        return False
+    word = value.strip().lower()
+    return _git_bool(word) is not None or word in _REBASE_WORDS
+
+
+def _ff_value_allowed(raw: str | None) -> bool:
+    """A git boolean, or ``only`` (``pull --ff-only``)."""
+    if raw is None:
+        return True
+    value = _unescape_config_value(raw)
+    if value is None:
+        return False
+    word = value.strip().lower()
+    return _git_bool(word) is not None or word == "only"
+
+
+def _remote_value_allowed(key: str, raw: str | None) -> bool:
+    if key in _REMOTE_STRING_KEYS:
+        return _string_value_allowed(raw)
+    if key == _REMOTE_TAGOPT_KEY:
+        return _choice_value_allowed(raw, _TAGOPT_VALUES)
+    if key in _REMOTE_BOOL_KEYS:
+        return _bool_value_allowed(raw)
+    return False
+
+
+def _branch_value_allowed(key: str, raw: str | None) -> bool:
+    if key in _BRANCH_STRING_KEYS:
+        return _string_value_allowed(raw)
+    if key == _BRANCH_REBASE_KEY:
+        return _rebase_value_allowed(raw)
+    return False
+
+
+def _pull_value_allowed(key: str, raw: str | None) -> bool:
+    if key not in _PULL_KEYS:
+        return False
+    if key == "rebase":
+        return _rebase_value_allowed(raw)
+    return key == "ff" and _ff_value_allowed(raw)
+
+
+def _push_value_allowed(key: str, raw: str | None) -> bool:
+    if key not in _PUSH_KEYS:
+        return False
+    if key == "default":
+        return _choice_value_allowed(raw, _PUSH_DEFAULT_VALUES)
+    return key == "autosetupremote" and _bool_value_allowed(raw)
+
+
+def _key_value_allowed(family: str, key: str, raw: str | None) -> bool:
+    """True when this one key is on the allowlist and its value parses."""
     if family == "core":
         return _core_value_allowed(key, raw)
-    if family == "remote" and key in _REMOTE_KEYS:
-        return _string_value_allowed(raw)
-    return family == "branch" and key in _BRANCH_KEYS and _string_value_allowed(raw)
+    if family == "remote":
+        return _remote_value_allowed(key, raw)
+    if family == "branch":
+        return _branch_value_allowed(key, raw)
+    if family == "pull":
+        return _pull_value_allowed(key, raw)
+    if family == "fetch":
+        return key in _FETCH_KEYS and _bool_value_allowed(raw)
+    if family == "push":
+        return _push_value_allowed(key, raw)
+    if family == "init":
+        return key in _INIT_KEYS and _string_value_allowed(raw)
+    if family == "user":
+        return key in _USER_KEYS and _string_value_allowed(raw)
+    return False
 
 
 def _section_allowed(family: str, subsection: str) -> bool:
-    """True for ``[core]``, ``[remote "<name>"]``, or ``[branch "<name>"]``.
+    """True for a flat allowlisted section, or a named remote or branch.
 
-    ``[filter.evil]`` and ``[remote.origin]`` are the same shape: the family is
-    the first dotted piece. ``core`` keys are not subsections, so ``[core.bare]``
-    is not the allowed ``bare = false`` line. ``include`` and ``includeIf`` are
-    not in this set.
+    Flat sections are ``core``, ``pull``, ``fetch``, ``push``, ``init``, and
+    ``user``. They take no subsection, so ``[core.bare]`` is not the allowed
+    ``bare = false`` line. ``remote`` and ``branch`` require a name. Being in
+    this set does not allow every key: each key is listed on its own.
+    ``[filter.evil]`` and ``[remote.origin]`` share a shape, and the family is
+    the first dotted piece. ``include`` and ``includeIf`` are not in this set.
     """
-    if family == "core":
+    if family in {"core", "pull", "fetch", "push", "init", "user"}:
         return not subsection
     if family in {"remote", "branch"}:
         return bool(subsection)
     return False
 
 
-def _config_is_custom(text: str) -> bool:
-    """True when ``text`` is not only the keys a normal clone writes.
+def _normalized_key(family: str, subsection: str, key: str) -> str:
+    """``section.subsection.key`` in the lowercase form the allowlist uses.
 
-    A continued line, a broken header, a key before any section, any other
-    section or key, ``include`` / ``includeIf``, or a value that does not
-    parse is custom. An empty file is not.
+    Empty pieces are left out. The value is never included.
+    """
+    return ".".join(part for part in (family, subsection, key) if part)
+
+
+def _assignment_offense(family: str, subsection: str, line: str, *, section_ok: bool) -> str | None:
+    """Normalized key when ``line`` refuses the file, else None.
+
+    ``""`` means the line refuses and has no key to name.
+    """
+    parts = _assignment_parts(line)
+    if parts is None:
+        return ""
+    key, raw = parts
+    if section_ok and _key_value_allowed(family, key, raw):
+        return None
+    return _normalized_key(family, subsection, key)
+
+
+def _continued_key(raw: str, family: str, subsection: str, *, seen_section: bool) -> str:
+    """Key named by a continued line. A continued line is always custom."""
+    stripped = _strip_config_comment(raw).strip()
+    if stripped.endswith("\\"):
+        stripped = stripped[:-1].rstrip()
+    if not stripped or stripped.startswith("["):
+        return ""
+    parts = _assignment_parts(stripped)
+    if parts is None:
+        return ""
+    if not seen_section:
+        return parts[0]
+    return _normalized_key(family, subsection, parts[0])
+
+
+def _config_offense(text: str) -> str | None:
+    """First offending key, or None when ``text`` is only allowlisted keys.
+
+    The key is ``section.subsection.key`` in lowercase, with no value.
+    ``""`` means the file is custom but no key could be named. An empty file
+    is allowed. A continued line, a broken header, a key before any section,
+    any other section or key, ``include`` / ``includeIf``, or a value that
+    does not parse is custom.
     """
     family = ""
+    subsection = ""
     seen_section = False
+    section_ok = False
+    saw_assignment = False
+
+    def unnamed_bad_section() -> str | None:
+        if seen_section and not section_ok and not saw_assignment:
+            return _normalized_key(family, subsection, "") or ""
+        return None
+
     for raw in text.splitlines():
         body = raw.lstrip()
         if raw.rstrip().endswith("\\") and body[:1] not in {"#", ";", ""}:
-            return True
+            return _continued_key(raw, family, subsection, seen_section=seen_section)
         line = _strip_config_comment(raw).strip()
         if not line:
             continue
         if line.startswith("["):
+            pending = unnamed_bad_section()
+            if pending is not None:
+                return pending
             end = _section_end(line)
             if end is None:
-                return True
+                return ""
             family, subsection = _split_section(line[1:end])
-            if not _section_allowed(family, subsection):
-                return True
             seen_section = True
+            section_ok = _section_allowed(family, subsection)
+            saw_assignment = False
             rest = line[end + 1 :].strip()
-            if rest and not _assignment_allowed(family, rest):
-                return True
+            if rest:
+                saw_assignment = True
+                offense = _assignment_offense(family, subsection, rest, section_ok=section_ok)
+                if offense is not None:
+                    return offense
             continue
-        if not seen_section or not _assignment_allowed(family, line):
-            return True
-    return False
+        if not seen_section:
+            parts = _assignment_parts(line)
+            if parts is None:
+                return ""
+            return parts[0]
+        saw_assignment = True
+        offense = _assignment_offense(family, subsection, line, section_ok=section_ok)
+        if offense is not None:
+            return offense
+    return unnamed_bad_section()
 
 
 def _read_nofollow(path: Path) -> tuple[bool, str] | None:
@@ -921,22 +1093,37 @@ def _read_nofollow(path: Path) -> tuple[bool, str] | None:
     return (True, data.decode("utf-8", "replace"))
 
 
-def _config_can_run_command(checkout: Path) -> bool:
-    """True when git config must keep the checkout from running git.
+def _config_refusal(checkout: Path) -> str | None:
+    """Detail when git config must keep the checkout, else None.
 
-    Both ``.git/config`` and ``.git/config.worktree`` are read, when the
-    worktree file exists. A missing file is safe. A symlink or an unreadable
-    file is not. Only the keys a normal clone writes are accepted.
+    None means ``.git/config`` and ``.git/config.worktree`` are missing or
+    hold only allowlisted keys, so git may run. Otherwise the detail is the
+    first offending key (``section.subsection.key``) and never its value. A
+    key in ``config.worktree`` is prefixed with that file name. ``""`` means
+    the file is unsafe but no key was named: unreadable, a symlink, or broken
+    syntax. ``include`` and ``includeIf`` are still refused.
     """
-    custom = False
     for name in ("config", "config.worktree"):
         found = _read_nofollow(checkout / ".git" / name)
         if found is None:
-            return True
+            return "config.worktree" if name == "config.worktree" else ""
         present, text = found
-        if present and _config_is_custom(text):
-            custom = True
-    return custom
+        if not present:
+            continue
+        offense = _config_offense(text)
+        if offense is None:
+            continue
+        if name == "config.worktree":
+            return f"config.worktree: {offense}" if offense else "config.worktree"
+        return offense
+    return None
+
+
+def _custom_config_reason(detail: str | None) -> str:
+    """Refusal for custom config. ``detail`` is a key name, or empty when unnamed."""
+    if detail:
+        return _keep(f"has custom git config ({detail})")
+    return _keep("has custom git config")
 
 
 def _attributes_assign_command(text: str) -> bool:
@@ -1139,9 +1326,9 @@ def _checkout_reason(path: Path) -> str | None:
 
     Git is not started when ``.git`` is not a real directory, when
     ``commondir``, ``gitdir``, or ``objects/info/alternates`` exists, when
-    config is outside the clone allowlist, when ``info/attributes`` has
+    config is outside the allowlist, when ``info/attributes`` has
     rules, when a ``.gitattributes`` sets ``filter=`` or ``diff=``, or when
-    a stash ref is already on disk.
+    a stash ref is already on disk. A config refusal names the first key.
     """
     reason = _git_dir_reason(path)
     if reason:
@@ -1151,11 +1338,10 @@ def _checkout_reason(path: Path) -> str | None:
     reason = _linked_git_reason(path)
     if reason:
         return reason
-    if (
-        _config_can_run_command(path)
-        or _info_attributes_custom(path)
-        or _attributes_can_run_command(path)
-    ):
+    refusal = _config_refusal(path)
+    if refusal is not None:
+        return _custom_config_reason(refusal)
+    if _info_attributes_custom(path) or _attributes_can_run_command(path):
         return _keep("has custom git config")
     reason = _stash_on_disk(path)
     if reason:

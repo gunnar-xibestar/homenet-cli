@@ -235,6 +235,44 @@ def _append_config(checkout: Path, text: str) -> None:
     path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
 
 
+# Every newly allowed key, in the mixed case git writes, on a real clone.
+_POLICY_CONFIG = """
+[branch "main"]
+	rebase = interactive
+	pushRemote = origin
+	description = local work
+[remote "origin"]
+	tagopt = --no-tags
+	pushurl = https://example.com/homenet.git
+	prune = true
+	skipDefaultUpdate = false
+[pull]
+	rebase = merges
+	ff = only
+[fetch]
+	prune = true
+[push]
+	default = simple
+	autoSetupRemote = true
+[init]
+	defaultBranch = main
+[user]
+	name = homenet
+	email = homenet@example.com
+"""
+
+# Allowlisted keys in config.worktree must not keep the checkout.
+_POLICY_WORKTREE = """\
+[branch "main"]
+	rebase = false
+[pull]
+	ff = only
+[user]
+	name = homenet
+	email = homenet@example.com
+"""
+
+
 def _clone_checkout(home: Path, tmp_path: Path) -> Path:
     """Init, commit, and clone from a local bare remote. The clone is under ``home``."""
     seed = _write_checkout(tmp_path / "seed")
@@ -429,6 +467,14 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         _safe_git(checkout)
         _append_config(checkout, "[core]\n\tfsmonitor = touch PWNED\n")
         return [checkout, checkout / "keep.txt"]
+    if case == "worktree_fsmonitor":
+        checkout = _write_checkout(home / "homenet-cli")
+        _safe_git(checkout)
+        (checkout / ".git" / "config.worktree").write_text(
+            "[core]\n\tFsMonitor = touch PWNED\n",
+            encoding="utf-8",
+        )
+        return [checkout, checkout / "keep.txt"]
     if case == "stash":
         checkout = _write_checkout(home / "homenet-cli")
         _safe_git(checkout)
@@ -454,6 +500,11 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         return [checkout, checkout / "untracked.txt"]
     if case == "pristine_clone":
         _clone_checkout(home, tmp_path)
+        return [tmp_path / "seed" / "keep.txt", tmp_path / "origin.git" / "config"]
+    if case == "policy_clone":
+        checkout = _clone_checkout(home, tmp_path)
+        _append_config(checkout, _POLICY_CONFIG)
+        (checkout / ".git" / "config.worktree").write_text(_POLICY_WORKTREE, encoding="utf-8")
         return [tmp_path / "seed" / "keep.txt", tmp_path / "origin.git" / "config"]
     if case == "commondir":
         checkout = _clone_checkout(home, tmp_path)
@@ -494,11 +545,13 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         "xdg_inside_home",
         "monorepo",
         "fsmonitor",
+        "worktree_fsmonitor",
         "stash",
         "worktree_config",
         "filter_evil",
         "core_worktree",
         "pristine_clone",
+        "policy_clone",
         "commondir",
         "bind_mount",
     ],
@@ -558,7 +611,12 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
         if case == "monorepo":
             assert "has untracked files" in captured.out
         if case == "fsmonitor":
-            assert "has custom git config" in captured.out
+            assert "has custom git config (core.fsmonitor)" in captured.out
+            assert "PWNED" not in captured.out
+            assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+        if case == "worktree_fsmonitor":
+            assert "has custom git config (config.worktree: core.fsmonitor)" in captured.out
+            assert "PWNED" not in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case == "stash":
             assert "has a stash" in captured.out
@@ -567,16 +625,21 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
             checkout = tmp_path / "home" / "homenet-cli"
             assert checkout.is_dir()
             assert (checkout / "untracked.txt").is_file()
-            assert "has custom git config" in captured.out
+            assert "has custom git config (core.worktree)" in captured.out
+            assert "clean-clone" not in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
+        if case == "worktree_config":
+            assert "has custom git config (extensions.worktreeconfig)" in captured.out
+        if case == "filter_evil":
+            assert "has custom git config (filter.evil.clean)" in captured.out
         if case in {"worktree_config", "filter_evil"}:
-            assert "has custom git config" in captured.out
+            assert "PWNED" not in captured.out
             assert not (tmp_path / "home" / "homenet-cli" / "PWNED").exists()
             ran = "\n".join(" ".join(argv) for argv, _kwargs in calls)
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
             assert "touch" not in ran
             assert "PWNED" not in ran
-        if case == "pristine_clone":
+        if case in {"pristine_clone", "policy_clone"}:
             assert not (tmp_path / "home" / "homenet-cli").exists()
             assert any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case == "commondir":
