@@ -90,7 +90,7 @@ def test_mdns_with_avahi(load_fixture):
         return load_fixture("avahi_resolve_a.txt")
 
     name = mdns_name("192.168.1.42", which=lambda n: "/usr/bin/avahi-resolve", run=run)
-    assert name == "gunnars-macbook.local"
+    assert name == "macbook.local"
     assert calls == [["/usr/bin/avahi-resolve", "-a", "192.168.1.42"]]
 
 

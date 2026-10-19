@@ -23,7 +23,7 @@ def test_missing_vendor_mac_hostname(load_fixture):
     assert devices["192.168.1.77"].vendor is None
     assert devices["192.168.1.42"].hostname is None
     me = devices["192.168.1.100"]
-    assert me.mac is None and me.vendor is None and me.hostname == "gunnar-laptop"
+    assert me.mac is None and me.vendor is None and me.hostname == "this-laptop"
 
 
 def test_no_hosts(load_fixture):

@@ -26,7 +26,7 @@
 </host>
 <host><status state="up" reason="localhost-response" reason_ttl="0"/>
 <address addr="192.168.1.100" addrtype="ipv4"/>
-<hostnames><hostname name="gunnar-laptop" type="PTR"/></hostnames>
+<hostnames><hostname name="this-laptop" type="PTR"/></hostnames>
 </host>
 <runstats><finished time="1760518803" timestr="Thu Oct 15 09:00:03 2026" summary="Nmap done at Thu Oct 15 09:00:03 2026; 256 IP addresses (5 hosts up) scanned in 2.91 seconds" elapsed="2.91" exit="success"/><hosts up="5" down="251" total="256"/>
 </runstats>

@@ -1,6 +1,6 @@
 # homenet
 
-homenet is a beginner-friendly command for seeing what is on your home network. It wraps nmap, so you can list devices, ports, and services without learning nmap's flags. It runs on Linux and needs Python 3.10 or newer.
+homenet is a beginner-friendly command line interface for seeing what is on your home network. It wraps nmap, so you can list devices, ports, and services without learning nmap's flags. It runs on Linux and needs Python 3.10 or newer.
 
 > **Only scan networks you own or have permission to scan.**
 
@@ -32,10 +32,10 @@ Install homenet with one of these. A plain https install fails until git has cre
 ```bash
 # Sign in once. git then uses gh as its credential helper.
 gh auth login
-pipx install "git+https://github.com/gunnarmail01-sketch/homenet-cli.git"
+pipx install "git+https://github.com/gunnar-xibestar/homenet-cli.git"
 
 # Or install over SSH:
-pipx install "git+ssh://git@github.com/gunnarmail01-sketch/homenet-cli.git"
+pipx install "git+ssh://git@github.com/gunnar-xibestar/homenet-cli.git"
 
 # Or, from a clone of this repo:
 pipx install .
@@ -130,22 +130,16 @@ homenet explain devices         # show the real commands, without running them
 
 ### `homenet uninstall`
 
-Removes this copy of homenet. It asks `Uninstall homenet? [y/N]` and the default is no. `--yes` skips the question. If this is not an interactive terminal and you did not pass `--yes`, homenet stops and tells you to add `--yes`, instead of waiting for an answer that will never come.
+Removes this copy of homenet. It asks `Uninstall homenet? [y/N]` and the default is no. `--yes` skips that question. A non-interactive terminal needs `--yes`.
 
-What it runs depends on how homenet was installed. It prints that command before it runs it:
+It prints the command before it runs it:
 
-- a virtual environment or a user-site install (`pip install` or `pip install --user`): `python -m pip uninstall -y homenet-cli`, using this program's Python
+- a virtual environment or a user-site install: `python -m pip uninstall -y homenet-cli`
 - pipx: `pipx uninstall homenet-cli`
 
-`--show-cmd` still prints the `$` line when the command actually runs. `homenet explain uninstall` prints the command and its purpose without running it. `--json` prints the result with no question on stdout. Add `--yes` for a script. `--show-cmd --json` adds the `commands` list, the same way as the other commands.
+The saved device snapshot stays. `--purge` deletes `baseline.json` and removes the data folder only when that leaves it empty. It also lists source checkouts named `homenet-cli` under your home directory. Deleting one always requires you to type `yes`, and only when the checkout is a clean git clone with no local changes, unpushed commits, or extra git config.
 
-The saved device snapshot stays put. homenet prints where it lives (`$XDG_DATA_HOME/homenet/baseline.json`, or `~/.local/share/homenet/baseline.json`) and says it was kept.
-
-`--purge` deletes `baseline.json` from that data folder, and removes the folder only when that leaves it empty. Any other name stays, and homenet lists it. It also looks for source checkouts under your home directory. A folder counts as a checkout only when its name is exactly `homenet-cli` and it contains a `pyproject.toml` whose project name is `homenet-cli`. homenet lists every path before it asks anything, including checkouts it will keep and why. `--yes` covers the uninstall and `baseline.json` only. Deleting a source checkout always requires you to type `yes`, even when you passed `--yes`, and only when the checkout is pristine: a real git repository with no local changes, untracked or ignored files (including a `.venv` or `__pycache__`), stash, unpushed commits, or missing upstream. A checkout is deleted only when `.git/config` and `.git/config.worktree` (if that file exists) contain nothing beyond an allowlist: the keys a normal clone writes (`core.repositoryformatversion` of 0 or 1, `core.filemode`, `core.bare` set to false, `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, `remote.<name>.url`, `remote.<name>.fetch`, `branch.<name>.remote`, and `branch.<name>.merge`), plus policy that cannot run a command or point git at another path (`branch.<name>.rebase`, `branch.<name>.pushremote`, `branch.<name>.description`, `remote.<name>.tagopt`, `remote.<name>.pushurl`, `remote.<name>.prune`, `remote.<name>.skipdefaultupdate`, `pull.rebase`, `pull.ff`, `fetch.prune`, `push.default`, `push.autosetupremote`, `init.defaultbranch`, `user.name`, and `user.email`). Any other section or key, an `include` or `includeIf`, or a value that does not parse keeps the checkout. The message names the first offending key and not its value, for example `has custom git config (core.fsmonitor); delete it yourself`. A key in `.git/config.worktree` names that file too. So does `.git/commondir`, `.git/gitdir`, `.git/objects/info/alternates`, a `.git/info/attributes` file that still has text after comments and whitespace are removed, a `filter=` or `diff=` line in `.gitattributes`, a `.git` that is not a real directory, or a mount inside the tree. If there is no terminal to type `yes`, the checkouts stay and homenet says so. Answering no, or closing the prompt, runs nothing and deletes nothing.
-
-The search stays inside your home directory. It does not follow symbolic links, does not walk hidden folders other than `~/.local`, skips dependency folders such as `node_modules`, and only looks a few levels down. It will not delete your home directory, `/`, or any path outside your home. If `HOME` is unset or empty, it deletes no files and explains why. A relative or empty `XDG_DATA_HOME` is ignored, the same way as when saving a baseline. Only `baseline.json` inside the homenet data folder is removed, never a parent directory and never a file homenet did not write.
-
-A system package, an editable checkout, or an install homenet does not recognize is not removed. homenet tells you to remove a system package with the package manager that installed it, or to run `python -m pip uninstall homenet-cli` from the source checkout, and exits 1. Nothing is run for those, and an editable checkout is not deleted. `uninstall` does not need sudo.
+A system package or an editable checkout is not removed. `uninstall` does not need sudo.
 
 ### `homenet wifi`
 
