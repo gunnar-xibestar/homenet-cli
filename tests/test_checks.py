@@ -59,7 +59,7 @@ def test_tool_version_error_still_ok():
 
 def test_privileges_root_and_sudo():
     assert check_privileges(geteuid=lambda: 0, environ={}).ok
-    r = check_privileges(geteuid=lambda: 0, environ={"SUDO_USER": "gunnar"})
+    r = check_privileges(geteuid=lambda: 0, environ={"SUDO_USER": "user"})
     assert r.ok and "sudo" in r.detail
 
 

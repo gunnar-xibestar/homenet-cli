@@ -1,5 +1,5 @@
 Connected to a4:2b:b0:11:22:33 (on wlp2s0)
-	SSID: Home WiFi
+	SSID: home-wifi
 	freq: 5180.0
 	RX: 123456 bytes (789 packets)
 	TX: 23456 bytes (123 packets)

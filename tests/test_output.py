@@ -198,7 +198,7 @@ def test_format_devices_accepts_parser_devices(load_fixture):
     ]
     assert "router.lan" in text
     assert "TP-Link Technologies" in text
-    assert "gunnar-laptop" in text
+    assert "this-laptop" in text
     assert "5 devices found." in text
     mine = next(line for line in text.splitlines() if line.startswith("192.168.1.100"))
     assert "unknown" in mine
