@@ -1,6 +1,6 @@
 # homenet
 
-homenet is a beginner-friendly command line interface for seeing what is on your home network. It wraps nmap, so you can list devices, ports, and services without learning nmap's flags. It runs on Linux and needs Python 3.10 or newer.
+homenet is a beginner-friendly (not so much considering setup) command line interface for seeing what is on your home network. It wraps nmap, so you can list devices, ports, and services without learning nmap's flags. It runs on Linux and needs Python 3.10 or newer.
 
 > **Only scan networks you own or have permission to scan.**
 
