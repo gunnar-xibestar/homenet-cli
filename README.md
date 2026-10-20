@@ -8,7 +8,7 @@ That line is the rule for this tool. Scanning a network you do not own can be il
 
 ## Install with pipx
 
-pipx keeps homenet in its own environment and puts the `homenet` command on your PATH. This repository is the package `homenet-cli`. It is not on PyPI. The PyPI project named `homenet` is a different tool. This git repository is private, so the install needs GitHub access.
+pipx keeps homenet in its own environment and puts the `homenet` command on your PATH. This repository is the package `homenet-cli`. It is not on PyPI. The PyPI project named `homenet` is a different tool.
 
 Get pipx from your distro, then run `pipx ensurepath` and open a new terminal:
 
@@ -27,11 +27,9 @@ sudo pacman -S python-pipx
 pipx ensurepath
 ```
 
-Install homenet with one of these. A plain https install fails until git has credentials.
+Install homenet with one of these:
 
 ```bash
-# Sign in once. git then uses gh as its credential helper.
-gh auth login
 pipx install "git+https://github.com/gunnar-xibestar/homenet-cli.git"
 
 # Or install over SSH:
