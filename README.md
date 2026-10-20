@@ -292,3 +292,11 @@ wsl --shutdown
 ```
 
 Run `homenet whoami-net`. The address should now be on your home LAN, and the warning should be gone.
+
+## License
+
+homenet-cli is free software, licensed under the GNU General Public License, version 3 or (at your option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 Gunnar Jackson
+
+The license covers the code, not what you point it at: only scan networks you own or have permission to scan.
