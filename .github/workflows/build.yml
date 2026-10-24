@@ -45,7 +45,7 @@ jobs:
           info="$(dpkg-deb --info "$deb")"
           contents="$(dpkg-deb --contents "$deb")"
           echo "$info"
-          grep -q "Depends: nmap, iproute2" <<<"$info"
+          grep -q "Depends: libc6 (>= 2.35), nmap, iproute2" <<<"$info"
           grep -q "Architecture: $ARCH" <<<"$info"
           grep -q "./usr/lib/homenet/install-method" <<<"$contents"
           grep -q "./usr/share/man/man1/homenet.1.gz" <<<"$contents"

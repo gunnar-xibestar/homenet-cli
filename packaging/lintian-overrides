@@ -1,4 +1,13 @@
 # Installed as /usr/share/lintian/overrides/homenet.
-# PyInstaller onefile: the ELF bootloader carries an appended zlib archive of
-# the Python runtime and modules. Stripping would corrupt that archive.
-homenet: unstripped-binary-or-object [usr/bin/homenet]
+# /usr/bin/homenet is a PyInstaller onefile binary: upstream's prebuilt ELF
+# bootloader followed by a zlib-compressed archive of Python and homenet.
+#
+# The bootloader is prebuilt by PyInstaller without PIE; rebuilding it is out
+# of scope for this package.
+homenet: hardening-no-pie [usr/bin/homenet]
+# Same prebuilt bootloader, linked without -z now.
+homenet: hardening-no-bindnow [usr/bin/homenet]
+# Stripping or editing sections would corrupt the appended archive.
+homenet: binary-has-unneeded-section .comment [usr/bin/homenet]
+# False positives: random byte runs inside the compressed archive.
+homenet: spelling-error-in-binary * [usr/bin/homenet]

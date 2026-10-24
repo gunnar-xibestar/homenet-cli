@@ -46,6 +46,7 @@ chmod 0644 "${root}/usr/share/man/man1/homenet.1.gz"
 install -m 0644 "${repo_root}/packaging/lintian-overrides" \
   "${root}/usr/share/lintian/overrides/homenet"
 
+copyright_year="$(git -C "${repo_root}" log -1 --format=%cd --date=format:%Y 2>/dev/null || date +%Y)"
 # Reproducible date: last commit time, else now.
 changelog_date="$(git -C "${repo_root}" log -1 --format=%cD 2>/dev/null || date -R)"
 cat <<CHANGELOG | gzip -9n -c >"${root}/usr/share/doc/homenet/changelog.gz"
@@ -63,7 +64,7 @@ Upstream-Name: homenet-cli
 Source: https://github.com/gunnar-xibestar/homenet-cli
 
 Files: *
-Copyright: Gunnar Jackson
+Copyright: ${copyright_year} Gunnar Jackson
 License: GPL-3.0-or-later
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -82,7 +83,7 @@ Version: ${version}
 Architecture: ${arch}
 Maintainer: Gunnar Jackson <gunnar-xibestar@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: nmap, iproute2
+Depends: libc6 (>= 2.35), nmap, iproute2
 Section: net
 Priority: optional
 Homepage: https://github.com/gunnar-xibestar/homenet-cli
@@ -91,6 +92,9 @@ Description: beginner-friendly home network detection tool
  home network without learning nmap's flags. Only scan networks you own
  or have permission to scan.
 CONTROL
+
+(cd "${root}" && find usr -type f -print0 | sort -z | xargs -0 md5sum >DEBIAN/md5sums)
+chmod 0644 "${root}/DEBIAN/md5sums"
 
 mkdir -p "${repo_root}/dist"
 out="${repo_root}/dist/homenet_${version}_${arch}.deb"
