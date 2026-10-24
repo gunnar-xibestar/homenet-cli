@@ -118,27 +118,23 @@ When the installer runs `sudo`, the password prompt comes from sudo itself, not 
 
 ## Uninstall
 
-`homenet uninstall` removes a pipx install, a virtual environment, or a user-site install. It asks first. It does not remove a `.deb`, and it does not remove the program copied to `~/.local/bin`. Saved device data stays unless you pass `--purge`. The questions it asks are in [Uninstall](uninstall.md).
+`homenet uninstall` asks first. It removes a pipx install, a virtual environment, a user-site install, or the single program in `~/.local/bin`. It removes that file only when it is the real program there, not a symbolic link and not a file outside that folder. It does not remove a `.deb`. Saved device data stays unless you pass `--purge`. The questions it asks are in [Uninstall](uninstall.md).
 
-For the `.deb` from this page, the package name is `homenet` (the same name the file starts with):
+The `.deb` package name is `homenet`. `homenet uninstall` prints this and does not run it:
 
 ```bash
 sudo apt remove homenet
 ```
 
-The password prompt comes from sudo itself. If apt says the package is missing, list what is installed and remove that name:
+The password prompt comes from sudo itself.
 
-```bash
-apt list --installed 'homenet*'
-```
-
-A binary install is one file:
+You can also delete a binary install yourself. That does not delete saved data:
 
 ```bash
 rm ~/.local/bin/homenet
 ```
 
-That does not delete saved data. [Uninstall](uninstall.md) covers `baseline.json` and `--purge`.
+[Uninstall](uninstall.md) covers `baseline.json` and `--purge`.
 
 ## Install with pipx
 

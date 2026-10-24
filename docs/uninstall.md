@@ -15,7 +15,9 @@ A system package or an editable checkout is not removed. `uninstall` does not ne
 
 ## A release package or ~/.local/bin
 
-`homenet uninstall` does not remove a `.deb`, and it does not remove a program copied to `~/.local/bin`. How to remove those, and the `sudo apt remove homenet` command, are in [Install](install.md#uninstall).
+A `.deb` is not removed. `homenet uninstall` tells you to run `sudo apt remove homenet`. The package name is `homenet`. See [Install](install.md#uninstall).
+
+A standalone binary in `~/.local/bin` is removed after you answer yes. `homenet uninstall` deletes only that one file. It refuses a symbolic link or anything outside `~/.local/bin`.
 
 ## See also
 

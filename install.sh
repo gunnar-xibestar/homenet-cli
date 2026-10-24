@@ -14,10 +14,10 @@ set -eu
 # ---------------------------------------------------------------------------
 # Release asset names
 #
-# No .github/workflows/release*.yml exists on main or any other branch yet
-# (no open pull request either). These are the names this installer expects
-# that workflow to publish on the latest GitHub release. Change them here
-# if the workflow uses different filenames.
+# These match .github/workflows/release.yml and packaging/build-binary.sh
+# and packaging/build-deb.sh. The release job copies install.sh from the
+# repo root when that file exists, writes SHA256SUMS with sha256sum, and
+# uploads that file with the other assets.
 #
 # SHA256SUMS_ASSET
 #   GNU sha256sum text format: "<64 hex><two spaces><filename>"
@@ -25,9 +25,8 @@ set -eu
 # DEB_NAME_PREFIX
 #   Debian package: homenet_<version>_<arch>.deb
 #   <arch> is amd64 or arm64 (Debian names, not the raw uname -m value).
-#   <version> is taken from the filename inside SHA256SUMS, for example
-#   homenet_0.3.0_amd64.deb. A release tag v0.3.0 does not put the "v" in
-#   the filename. The package name inside the .deb is assumed to be homenet.
+#   <version> is the pyproject version, with no leading v. Tag v0.3.0
+#   publishes homenet_0.3.0_<arch>.deb. The control file sets Package: homenet.
 # BIN_NAME_PREFIX
 #   Standalone executable, not a tarball: homenet-linux-<arch>
 #   Example: homenet-linux-amd64. Installed as ~/.local/bin/homenet (mode 755).
