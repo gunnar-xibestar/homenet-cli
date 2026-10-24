@@ -14,7 +14,7 @@ case "${arch}" in
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="ubuntu:22.04"
+image="ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956"
 name="homenet-linux-${arch}"
 mkdir -p "${repo_root}/dist"
 
@@ -34,7 +34,7 @@ docker run --rm \
     rm -rf /build/dist /build/build /build/src/*.egg-info
     python3 -m venv /venv
     /venv/bin/pip install -q --upgrade pip
-    /venv/bin/pip install -q /build pyinstaller
+    /venv/bin/pip install -q /build pyinstaller==6.22.3
     cd /build
     /venv/bin/pyinstaller --onefile --clean --noconfirm \
       --name "${NAME}" \
