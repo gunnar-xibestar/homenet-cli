@@ -50,3 +50,11 @@ def no_real_commands(monkeypatch):
     for name in ("run", "Popen", "call", "check_call", "check_output"):
         monkeypatch.setattr(subprocess, name, _blocked)
     monkeypatch.setattr("os.system", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def no_host_install_marker(monkeypatch, tmp_path):
+    """Point the deb marker at a missing file, so the host's real marker is never read."""
+    from homenet.core import selfinstall
+
+    monkeypatch.setattr(selfinstall, "DEB_MARKER", tmp_path / "no-install-method")

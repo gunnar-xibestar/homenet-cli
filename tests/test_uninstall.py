@@ -506,6 +506,20 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         _append_config(checkout, _POLICY_CONFIG)
         (checkout / ".git" / "config.worktree").write_text(_POLICY_WORKTREE, encoding="utf-8")
         return [tmp_path / "seed" / "keep.txt", tmp_path / "origin.git" / "config"]
+    if case in {"gitdir_file", "alternates"}:
+        checkout = _clone_checkout(home, tmp_path)
+        if case == "gitdir_file":
+            target = checkout / ".git" / "gitdir"
+            target.write_text(str(tmp_path / "elsewhere" / ".git") + "\n", encoding="utf-8")
+        else:
+            target = checkout / ".git" / "objects" / "info" / "alternates"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(tmp_path / "objects") + "\n", encoding="utf-8")
+        return [checkout, checkout / "keep.txt"]
+    if case == "git_pointer":
+        checkout = _write_checkout(home / "homenet-cli")
+        (checkout / ".git").write_text(f"gitdir: {tmp_path / 'real.git'}\n", encoding="utf-8")
+        return [checkout, checkout / "keep.txt"]
     if case == "commondir":
         checkout = _clone_checkout(home, tmp_path)
         other = _write_checkout(tmp_path / "filtered-git")
@@ -553,6 +567,9 @@ def _prepare_purge_case(case: str, monkeypatch, tmp_path: Path, mounted: list[Pa
         "pristine_clone",
         "policy_clone",
         "commondir",
+        "gitdir_file",
+        "alternates",
+        "git_pointer",
         "bind_mount",
     ],
 )
@@ -578,10 +595,16 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda prompt="": "yes")
 
-        assert main(["uninstall", "--yes", "--purge"]) == 0
+        code = main(["uninstall", "--yes", "--purge"])
 
         captured = capsys.readouterr()
-        assert _pip_argv(calls)[:4] == [sys.executable, "-m", "pip", "uninstall"]
+        if case == "unset_home":
+            # Refused up front: nothing is planned, run, or deleted.
+            assert code == 1
+            assert calls == []
+        else:
+            assert code == 0
+            assert _pip_argv(calls)[:4] == [sys.executable, "-m", "pip", "uninstall"]
         for path in survive:
             assert os.path.lexists(path)
             if path.name == "keep.txt":
@@ -649,6 +672,10 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
             assert "touch" not in ran
             assert "PWNED" not in ran
+        if case in {"gitdir_file", "alternates", "git_pointer"}:
+            reason = "gitdir pointer" if case == "git_pointer" else "linked git directory"
+            assert f"has a {reason}" in captured.out
+            assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
         if case == "bind_mount":
             assert "has a mount inside it" in captured.out
             assert not any(argv and argv[0] == "git" for argv, _kwargs in calls)
@@ -660,7 +687,8 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
             _umount(path)
 
 
-def test_yes_alone_does_not_delete_checkouts(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("answer", ["n", "y", "Y"])
+def test_yes_alone_does_not_delete_checkouts(answer, monkeypatch, tmp_path, capsys):
     path = _baseline(monkeypatch, tmp_path)
     home = path.parents[2]
     checkout = _write_checkout(home / "src" / "homenet-cli")
@@ -674,7 +702,7 @@ def test_yes_alone_does_not_delete_checkouts(monkeypatch, tmp_path, capsys):
     def answer_no(prompt: str = "") -> str:
         shown.append(capsys.readouterr().out)
         prompts.append(prompt)
-        return "n"
+        return answer
 
     monkeypatch.setattr("builtins.input", answer_no)
 
@@ -781,7 +809,7 @@ def test_typed_yes_deletes_checkout_and_data(monkeypatch, tmp_path, capsys):
     assert "Traceback" not in captured.out + captured.err
 
 
-@pytest.mark.parametrize("kind", ["eof", "keyboard", "no_tty"])
+@pytest.mark.parametrize("kind", ["eof", "keyboard", "no_tty", "yes_no_tty"])
 def test_prompt_keeps_files(kind, monkeypatch, tmp_path, capsys):
     """EOF, Ctrl-C, and a missing terminal keep every file and do not traceback."""
     path = _baseline(monkeypatch, tmp_path)
@@ -799,6 +827,22 @@ def test_prompt_keeps_files(kind, monkeypatch, tmp_path, capsys):
         assert main(["uninstall", "--purge"]) == 1
         captured = capsys.readouterr()
         assert "not an interactive terminal" in captured.out
+    elif kind == "yes_no_tty":
+        calls = _record(monkeypatch)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+        def refuse_input(prompt: str = "") -> str:
+            raise AssertionError(prompt)
+
+        monkeypatch.setattr("builtins.input", refuse_input)
+        assert main(["uninstall", "--yes", "--purge"]) == 0
+        captured = capsys.readouterr()
+        assert _pip_argv(calls)[-1] == _DIST
+        assert "Source checkouts kept:" in captured.out
+        assert checkout.is_dir()
+        assert (checkout / "keep.txt").is_file()
+        assert not path.exists()
+        return
     else:
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
@@ -813,3 +857,132 @@ def test_prompt_keeps_files(kind, monkeypatch, tmp_path, capsys):
     assert checkout.is_dir()
     assert (checkout / "keep.txt").is_file()
     assert "Traceback" not in captured.out + captured.err
+
+
+class _DirectDist(_Dist):
+    def __init__(self, prefix: str, direct: str | None, site: str | None = None) -> None:
+        super().__init__(prefix)
+        self._direct = direct
+        self._site = Path(site) if site else None
+
+    def read_text(self, filename: str) -> str | None:
+        return self._direct
+
+    def locate_file(self, path: str) -> Path:
+        return (self._site or self._prefix / "lib" / "site-packages") / path
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "argv"),
+    [
+        ("venv", "venv", "pip"),
+        ("pipx_home", "pipx", ["pipx", "uninstall", _DIST]),
+        ("pipx_env", "pipx", ["pipx", "uninstall", _DIST]),
+        ("pipx_lookalike", "venv", "pip"),
+        ("editable", "editable", None),
+        ("system", "system", None),
+    ],
+)
+def test_detect_install_kinds(case, kind, argv, monkeypatch, tmp_path):
+    """Only venv, user, and exact pipx installs get a command; it is a fixed argv, no shell."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.setattr(selfinstall, "_user_site", lambda: None)
+    prefix = {
+        "pipx_home": home / ".local" / "pipx" / "venvs" / "homenet-cli",
+        "pipx_env": tmp_path / "px" / "venvs" / "homenet-cli",
+        "pipx_lookalike": tmp_path / "mypipx-venvs" / "venvs" / "homenet-cli",
+    }.get(case, tmp_path / "venv")
+    if case == "pipx_env":
+        monkeypatch.setenv("PIPX_HOME", str(tmp_path / "px"))
+    direct = None
+    if case == "editable":
+        direct = '{"url": "file:///src/homenet-cli", "dir_info": {"editable": true}}'
+    site = "/usr/lib/python3/dist-packages" if case == "system" else None
+    dist = _DirectDist(str(prefix), direct, site)
+    dist.metadata = {"Name": "Evil; rm -rf ~"}
+    monkeypatch.setattr(selfinstall, "distribution", lambda name: dist)
+    base = "/usr" if case != "system" else str(prefix)
+    info = selfinstall.detect_install(
+        prefix=str(prefix), base_prefix=base, executable="/venv/bin/python"
+    )
+    assert info.kind == kind
+    assert info.distribution == _DIST
+    if argv is None:
+        assert info.command is None
+        if case == "system":
+            assert "apt" not in info.hint and "package manager" in info.hint
+        return
+    expected = (
+        ["/venv/bin/python", "-m", "pip", "uninstall", "-y", _DIST] if argv == "pip" else argv
+    )
+    assert list(info.command.argv) == expected
+    calls = _record(monkeypatch)
+    selfinstall.run_uninstall(info.command)
+    ((ran, kwargs),) = calls
+    assert ran == expected
+    assert not kwargs.get("shell")
+
+
+@pytest.mark.parametrize(
+    ("home", "inside"),
+    [("/", "etc"), ("home", "."), ("home", "../outside"), ("home", "link-out"), ("home", "a/b")],
+)
+def test_contained_is_strictly_under_real_home(home, inside, tmp_path):
+    """Purge targets must resolve strictly inside realpath(HOME), never / or HOME."""
+    root = Path("/") if home == "/" else tmp_path / "home"
+    if home != "/":
+        (root / "a" / "b").mkdir(parents=True)
+        (tmp_path / "outside").mkdir()
+        (root / "link-out").symlink_to(tmp_path / "outside")
+    expected = inside == "a/b"
+    assert selfinstall._contained(root / inside, root) is expected
+
+
+@pytest.mark.parametrize("target", ["checkout", "data"])
+def test_delete_rechecks_identity(target, monkeypatch, tmp_path):
+    """A directory swapped after planning (new inode) is not deleted."""
+    path = _baseline(monkeypatch, tmp_path)
+    home = path.parents[2]
+    checkout = _write_checkout(home / "src" / "homenet-cli")
+    _safe_git(checkout)
+    _record(monkeypatch)
+    plan = selfinstall.plan_purge()
+    stale = (0, 0)
+    with pytest.raises(selfinstall.SelfInstallError):
+        if target == "checkout":
+            (item,) = plan.checkouts
+            assert item.deletable
+            selfinstall.remove_checkout(item.path, home=plan.home, identity=stale)
+        else:
+            selfinstall.remove_data_dir(plan.data_dir, home=plan.home, identity=stale)
+    assert (checkout / "keep.txt").is_file()
+    assert path.is_file()
+
+
+def test_json_prompt_is_flushed_before_reading(monkeypatch, tmp_path, capsys):
+    """--json asks on stderr and flushes before it waits for an answer."""
+    _baseline(monkeypatch, tmp_path)
+    _record(monkeypatch)
+    _as_venv(monkeypatch, str(tmp_path / "venv"))
+    flushed: list[bool] = []
+    real_print = print
+
+    def spy_print(*args, **kwargs):
+        if kwargs.get("file") is sys.stderr and kwargs.get("end") == "":
+            flushed.append(bool(kwargs.get("flush")))
+        return real_print(*args, **kwargs)
+
+    class _Stdin:
+        def isatty(self):
+            return True
+
+        def readline(self):
+            assert flushed == [True]
+            return "n\n"
+
+    monkeypatch.setattr("builtins.print", spy_print)
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    assert main(["uninstall", "--json"]) == 0
+    assert flushed == [True]

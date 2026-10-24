@@ -49,6 +49,14 @@ homenet explain devices
 | [`homenet uninstall`](docs/uninstall.md#homenet-uninstall) | remove homenet; saved data stays unless --purge |
 | [`homenet explain devices`](docs/explain.md#see-the-real-command) | show the real commands, without running them |
 
+`homenet uninstall` checks how this copy was installed first:
+
+- **pip, pipx, or a virtual environment**: it runs the matching `pip uninstall` or `pipx uninstall`.
+- **Standalone binary in `~/.local/bin`**: it removes only that one file, and refuses a symbolic link or anything outside `~/.local/bin`.
+- **Debian package**: it removes nothing and tells you to run `sudo apt remove homenet`.
+
+`--purge` refuses to start when `HOME` is unset, empty, or points at `/`.
+
 The table lists every command the CLI has. `explain` takes the name of any command, for example `homenet explain devices`. Longer notes are in [Commands](docs/commands.md).
 
 ## Documentation

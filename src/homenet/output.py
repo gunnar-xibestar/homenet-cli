@@ -169,7 +169,9 @@ lookup result. ``upstream`` is filled when a server is a local resolver.
 
     {"cancelled": bool, "checkouts": [{"kept_reason": str|null, "path": str}, ...],
      "data_kept": bool, "data_left": [str, ...], "data_paths": [str, ...],
-     "distribution": str, "install": "venv"|"pipx"|"user", "purged": bool,
+     "binary": str|null, "distribution": str,
+     "message": str|null, "fix_hint": str|null,
+     "install": "venv"|"pipx"|"user"|"binary"|"deb", "purged": bool,
      "removed_checkouts": [str, ...], "removed_paths": [str, ...],
      "uninstalled": bool}
 
@@ -236,6 +238,8 @@ _INSTALL_LABELS = {
     "venv": "pip in a virtual environment",
     "user": "pip in your user site-packages",
     "pipx": "pipx",
+    "binary": "a standalone binary in ~/.local/bin",
+    "deb": "a system package",
 }
 
 _WHOAMI_NOTES = (
@@ -357,10 +361,13 @@ def format_uninstall_result(
     kept_data: Sequence[str] = (),
     data_dir: str | None = None,
     note: str | None = None,
+    removed_binary: str | None = None,
 ) -> str:
     """Text after a successful uninstall. Says whether saved data was kept."""
     name = _clean(distribution) or "homenet"
     lines = [f"Uninstalled {name}."]
+    if removed_binary:
+        lines.append(f"Removed {_clean(removed_binary) or ''}.")
     if purge:
         if removed:
             lines.extend(f"Removed {_clean(path) or ''}." for path in removed)
@@ -391,8 +398,14 @@ def format_uninstall_json(
     checkouts: Sequence[tuple[str, str | None]] = (),
     removed_checkouts: Sequence[str] = (),
     data_left: Sequence[str] = (),
+    binary: str | None = None,
+    message: str | None = None,
+    fix_hint: str | None = None,
 ) -> str:
     """JSON for ``homenet uninstall --json``.
+
+    ``binary`` is the removed executable of a binary install. ``message`` and
+    ``fix_hint`` are always present: null unless set (a deb install sets both).
 
     Shape: ``cancelled``, ``checkouts``, ``data_kept``, ``data_left``,
     ``data_paths``, ``distribution``, ``install``, ``purged``,
@@ -409,31 +422,45 @@ def format_uninstall_json(
                 "path": _clean(path) or "",
             }
         )
-    return _dumps(
-        {
-            "cancelled": cancelled,
-            "checkouts": checkout_rows,
-            "data_kept": not purged,
-            "data_left": [_clean(name) or "" for name in data_left],
-            "data_paths": [_clean(path) or "" for path in paths],
-            "distribution": _clean(distribution) or "",
-            "install": _clean(kind) or "",
-            "purged": purged,
-            "removed_checkouts": [_clean(path) or "" for path in removed_checkouts],
-            "removed_paths": [_clean(path) or "" for path in removed],
-            "uninstalled": bool(uninstalled and not cancelled),
-        }
-    )
+    payload: dict = {
+        "cancelled": cancelled,
+        "checkouts": checkout_rows,
+        "data_kept": not purged,
+        "data_left": [_clean(name) or "" for name in data_left],
+        "data_paths": [_clean(path) or "" for path in paths],
+        "distribution": _clean(distribution) or "",
+        "install": _clean(kind) or "",
+        "purged": purged,
+        "removed_checkouts": [_clean(path) or "" for path in removed_checkouts],
+        "removed_paths": [_clean(path) or "" for path in removed],
+        "uninstalled": bool(uninstalled and not cancelled),
+        "binary": _clean(binary) if binary else None,
+        "message": _clean(message) if message else None,
+        "fix_hint": _clean(fix_hint) if fix_hint else None,
+    }
+    return _dumps(payload)
 
 
-def format_explain_json(command: str, commands: Sequence[dict]) -> str:
+def format_explain_json(
+    command: str,
+    commands: Sequence[dict],
+    *,
+    note: str | None = None,
+    fix_hint: str | None = None,
+) -> str:
     """JSON for ``homenet explain <command> --json``.
 
     Shape: ``{"command": str, "commands": [<command>, ...]}``. Each command
     object is the one :meth:`~homenet.core.commands.Command.to_dict` returns,
-    with ``display`` and ``purpose`` already cleaned by the caller.
+    with ``display`` and ``purpose`` already cleaned by the caller. When
+    ``note`` is set (a deb or binary uninstall, which runs no command),
+    ``note`` and ``fix_hint`` are added.
     """
-    return _dumps({"command": _clean(command) or "", "commands": list(commands)})
+    payload: dict = {"command": _clean(command) or "", "commands": list(commands)}
+    if note is not None:
+        payload["note"] = _clean(note) or ""
+        payload["fix_hint"] = _clean(fix_hint) if fix_hint else None
+    return _dumps(payload)
 
 
 def merge_commands(document: str, commands: Sequence[dict]) -> str:
