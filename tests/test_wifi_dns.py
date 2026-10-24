@@ -59,7 +59,7 @@ def test_channel_and_band(mhz, channel, band):
         (
             "iw_link_5ghz.txt",
             {
-                "ssid": "Home WiFi",
+                "ssid": "home-wifi",
                 "frequency_mhz": 5180,
                 "signal_dbm": -52,
                 "link_speed_mbps": 866.7,
@@ -111,7 +111,7 @@ def test_connected_nmcli_then_iw(load_fixture):
         link_speed_mbps=866.7,
     )
     # executed == hook == planned (SSID step needs the runtime connection name)
-    planned = commands.plan_wifi(connection="Home WiFi", which=TOOLS.get, **SYS)
+    planned = commands.plan_wifi(connection="home-wifi", which=TOOLS.get, **SYS)
     assert run.calls == [c.argv for c in seen] == [c.argv for c in planned]
     assert planned_commands("wifi", which=TOOLS.get, **SYS)[0].display() == (
         "/usr/bin/nmcli -t -f GENERAL.STATE,GENERAL.CONNECTION device show wlp2s0"
@@ -122,7 +122,7 @@ def test_connected_nmcli_then_iw(load_fixture):
 
 def test_iw_only(load_fixture):
     w = info(fake_run(load_fixture), which={"iw": "/usr/sbin/iw"}.get)
-    assert w.available and w.ssid == "Home WiFi" and w.band == "5 GHz"
+    assert w.available and w.ssid == "home-wifi" and w.band == "5 GHz"
 
 
 @pytest.mark.parametrize(
