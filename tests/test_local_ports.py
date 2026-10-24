@@ -10,6 +10,7 @@ import pytest
 from homenet.cli import main
 from homenet.core import local_ports
 from homenet.core.local_ports import Listener, _parse_ss
+from homenet.output import format_local_ports
 
 HEADER = "State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
 
@@ -107,27 +108,18 @@ def test_ss_missing_gives_install_hint(monkeypatch, capsys):
     "argv",
     [
         ["ports", "--local", "192.168.1.1"],
-        *(
-            pytest.param(
-                argv,
-                marks=pytest.mark.xfail(
-                    strict=True, raises=TypeError, reason="_fail_message() called without hint"
-                ),
-            )
-            for argv in (
-                ["explain", "ports", "192.168.1.1", "--local"],
-                ["explain", "devices", "--local"],
-            )
-        ),
+        ["explain", "ports", "192.168.1.1", "--local"],
+        ["explain", "devices", "--local"],
     ],
 )
-def test_bad_local_usage_exits_2(argv, monkeypatch):
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_bad_local_usage_exits_2(argv, json_mode, monkeypatch, capsys):
     monkeypatch.setattr(local_ports.shutil, "which", lambda name: "/usr/bin/ss")
-    try:
-        code = main(argv)
-    except SystemExit as exc:
-        code = exc.code
-    assert code == 2
+    assert main([*argv, "--json"] if json_mode else argv) == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    if json_mode:
+        assert set(json.loads(captured.err)) == {"error", "fix_hint"}
 
 
 def test_ports_local_happy_path(fake_ss, capsys):
@@ -147,7 +139,15 @@ def test_explain_ports_local_lists_both_ss_commands(monkeypatch, capsys):
     assert "-ltnp" in out and "-lunp" in out
 
 
-@pytest.mark.xfail(strict=True, reason="explain ports --local does not catch LocalPortsError")
-def test_explain_ports_local_without_ss_is_friendly(monkeypatch, capsys):
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_explain_ports_local_without_ss_is_friendly(json_mode, monkeypatch, capsys):
     monkeypatch.setattr(local_ports.shutil, "which", lambda name: None)
-    assert main(["explain", "ports", "--local"]) == 1
+    assert main(["explain", "ports", "--local", *(["--json"] if json_mode else [])]) == 1
+    captured = capsys.readouterr()
+    assert "iproute2" in captured.out + captured.err
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_ipv6_listener_is_bracketed():
+    text = format_local_ports([Listener("tcp", "::", 80), Listener("udp", "::1", 53)])
+    assert "[::]:80" in text and "[::1]:53" in text
