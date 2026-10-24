@@ -1,0 +1,4 @@
+# Installed as /usr/share/lintian/overrides/homenet.
+# PyInstaller onefile: the ELF bootloader carries an appended zlib archive of
+# the Python runtime and modules. Stripping would corrupt that archive.
+homenet: unstripped-binary-or-object [usr/bin/homenet]

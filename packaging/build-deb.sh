@@ -35,12 +35,27 @@ trap 'rm -rf "${staging}"' EXIT
 root="${staging}/homenet_${version}_${arch}"
 
 install -d -m 0755 "${root}/DEBIAN" "${root}/usr/bin" "${root}/usr/lib/homenet" \
-  "${root}/usr/share/man/man1" "${root}/usr/share/doc/homenet"
+  "${root}/usr/share/man/man1" "${root}/usr/share/doc/homenet" \
+  "${root}/usr/share/lintian/overrides"
 install -m 0755 "${binary}" "${root}/usr/bin/homenet"
 printf 'deb\n' >"${root}/usr/lib/homenet/install-method"
 chmod 0644 "${root}/usr/lib/homenet/install-method"
 gzip -9n -c "${repo_root}/packaging/homenet.1" >"${root}/usr/share/man/man1/homenet.1.gz"
 chmod 0644 "${root}/usr/share/man/man1/homenet.1.gz"
+
+install -m 0644 "${repo_root}/packaging/lintian-overrides" \
+  "${root}/usr/share/lintian/overrides/homenet"
+
+# Reproducible date: last commit time, else now.
+changelog_date="$(git -C "${repo_root}" log -1 --format=%cD 2>/dev/null || date -R)"
+cat <<CHANGELOG | gzip -9n -c >"${root}/usr/share/doc/homenet/changelog.gz"
+homenet (${version}) unstable; urgency=medium
+
+  * Release ${version}. See https://github.com/gunnar-xibestar/homenet-cli/releases
+
+ -- Gunnar Jackson <gunnar-xibestar@users.noreply.github.com>  ${changelog_date}
+CHANGELOG
+chmod 0644 "${root}/usr/share/doc/homenet/changelog.gz"
 
 cat >"${root}/usr/share/doc/homenet/copyright" <<COPYRIGHT
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/

@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Resolve and check version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          pyproject_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' pyproject.toml | head -n1)"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            tag_version="${REF_NAME#v}"
+            if [[ "$tag_version" != "$pyproject_version" ]]; then
+              echo "::error::tag $REF_NAME does not match pyproject version $pyproject_version"
+              exit 1
+            fi
+          fi
+          echo "VERSION=$pyproject_version" >> "$GITHUB_ENV"
+
+      - name: Build binary
+        run: packaging/build-binary.sh "$ARCH"
+
+      - name: Build .deb
+        run: packaging/build-deb.sh "$ARCH" "$VERSION"
+
+      - name: Smoke-test binary
+        run: |
+          bin="dist/homenet-linux-$ARCH"
+          test "$("$bin" --version)" = "homenet $VERSION"
+          "$bin" --help | grep -q "Only scan networks you own"
+          "$bin" explain devices --network 192.168.1.0/24 | grep -q "nmap"
+
+      - name: Install and test .deb
+        run: |
+          deb="dist/homenet_${VERSION}_${ARCH}.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "./$deb"
+          test "$(homenet --version)" = "homenet $VERSION"
+          test "$(cat /usr/lib/homenet/install-method)" = "deb"
+
+      - name: Lintian
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends lintian
+          lintian --version
+          lintian --fail-on error --display-info --show-overrides "dist/homenet_${VERSION}_${ARCH}.deb"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            dist/homenet-linux-${{ matrix.arch }}
+            dist/homenet_*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Collect assets and write SHA256SUMS
+        run: |
+          if [[ -f install.sh ]]; then
+            cp install.sh dist/install.sh
+          fi
+          cd dist
+          ls homenet_*_amd64.deb homenet_*_arm64.deb homenet-linux-amd64 homenet-linux-arm64
+          assets=(homenet-linux-* homenet_*.deb)
+          if [[ -f install.sh ]]; then
+            assets+=(install.sh)
+          fi
+          chmod 0755 homenet-linux-*
+          sha256sum "${assets[@]}" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          grep -c '\.deb$' SHA256SUMS
+          cat SHA256SUMS
+          printf '%s\n' "${assets[@]}" SHA256SUMS > ../assets.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mapfile -t assets < assets.txt
+          cd dist
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes "${assets[@]}"
