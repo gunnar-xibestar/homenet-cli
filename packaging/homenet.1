@@ -1,0 +1,96 @@
+.TH HOMENET 1 "2026" "homenet" "User Commands"
+.SH NAME
+homenet \- beginner-friendly tools for seeing what is on your home network
+.SH SYNOPSIS
+.B homenet
+.RB [ \-h ]
+.RB [ \-\-version ]
+.RB [ \-v ]
+.RB [ \-\-show\-cmd ]
+.I command
+.RI [ args ...]
+.SH DESCRIPTION
+.B homenet
+wraps
+.BR nmap (1)
+so you can list devices, ports, and services without learning nmap's flags.
+.PP
+.B Only scan networks you own or have permission to scan.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show help and exit. Each command also accepts
+.BR \-\-help .
+.TP
+.B \-\-version
+Show the program version and exit.
+.TP
+.BR \-v ", " \-\-verbose
+Show each step on stderr. Repeat
+.RB ( \-vv )
+to include nmap's progress.
+.TP
+.B \-\-show\-cmd
+Show each real command on stderr before it runs. With
+.BR \-\-json ,
+add a commands list instead.
+.SH COMMANDS
+.TP
+.B whoami\-net
+Show this computer's address on your home network.
+.TP
+.B devices
+List devices currently on your home network.
+.TP
+.BI device " IP"
+Show details for one device by its IP address.
+.TP
+.B ports
+List remote ports, or local listeners with
+.BR \-\-local .
+.TP
+.BI services " IP"
+Show the services running on one device.
+.TP
+.B router
+Find your home router.
+.TP
+.B baseline
+Save a snapshot of the devices on your network.
+.TP
+.B new\-devices
+List devices that were not in your saved snapshot.
+.TP
+.B speed
+Check how fast your internet connection is.
+.TP
+.B wifi
+Show the Wi\-Fi signal, band, and channel.
+.TP
+.B dns
+Show DNS servers and try a lookup.
+.TP
+.B doctor
+Check that tools and permissions are ready.
+.TP
+.B uninstall
+Remove homenet from this computer.
+.TP
+.BI explain " command"
+Show the real commands a command would run, without running them. Use
+.BI \-\-network " CIDR"
+to skip the network lookup.
+.SH SUDO
+Root adds MAC addresses and makers for
+.BR devices ", " device ", " baseline ", and " new\-devices .
+.BR doctor ", " whoami\-net ", " explain ", " speed ", " wifi ", " dns ", and " uninstall
+do not need sudo.
+.SH EXAMPLES
+.nf
+homenet devices
+sudo homenet devices
+homenet explain devices \-\-network 192.168.1.0/24
+.fi
+.SH SEE ALSO
+.BR nmap (1),
+.BR ip (8)
