@@ -60,11 +60,7 @@ _EXPLAIN = (
     ("baseline", [], {"local_network": NET}),
     ("new-devices", [], {"local_network": NET}),
     ("device", ["192.168.1.10"], {"local_network": NET}),
-    (
-        "ports",
-        ["192.168.1.1"],
-        {"target": "192.168.1.1", "local_network": NET, "top_ports": 100, "local": False},
-    ),
+    ("ports", ["192.168.1.1"], {"target": "192.168.1.1", "local_network": NET, "top_ports": 100}),
     (
         "services",
         ["192.168.1.1"],
@@ -292,7 +288,7 @@ def test_explain(command, extra, params, json_mode, capsys, monkeypatch, no_scan
         (["explain", "devices", "--network", NET], {"local_network": NET}, 0),
         (
             ["explain", "ports", "192.168.1.1", "--network", NET],
-            {"target": "192.168.1.1", "local_network": NET, "top_ports": 100, "local": False},
+            {"target": "192.168.1.1", "local_network": NET, "top_ports": 100},
             0,
         ),
         (

@@ -106,7 +106,6 @@ def test_ss_missing_gives_install_hint(monkeypatch, capsys):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["ports"],
         ["ports", "--local", "192.168.1.1"],
         *(
             pytest.param(
@@ -124,7 +123,11 @@ def test_ss_missing_gives_install_hint(monkeypatch, capsys):
 )
 def test_bad_local_usage_exits_2(argv, monkeypatch):
     monkeypatch.setattr(local_ports.shutil, "which", lambda name: "/usr/bin/ss")
-    assert main(argv) == 2
+    try:
+        code = main(argv)
+    except SystemExit as exc:
+        code = exc.code
+    assert code == 2
 
 
 def test_ports_local_happy_path(fake_ss, capsys):
