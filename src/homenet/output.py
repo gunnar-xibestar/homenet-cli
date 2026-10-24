@@ -221,6 +221,7 @@ from homenet.core.baseline import DeviceDiff
 from homenet.core.checks import CheckResult
 from homenet.core.devices import normalize_mac
 from homenet.core.dns import DnsConfig, LookupResult
+from homenet.core.local_ports import Listener
 from homenet.core.netinfo import NetInfo
 from homenet.core.parser import Device, Port
 from homenet.core.port_notes import GENERIC_NOTE, PortNote
@@ -687,6 +688,45 @@ def format_ports_json(device: Device, notes: Sequence[PortNote]) -> str:
         "ports": [_port_payload(port, _find_note(port, notes)) for port in _open_ports(device)],
     }
     return _dumps(payload)
+
+
+def format_local_ports(listeners: Sequence[Listener]) -> str:
+    """Readable local TCP and UDP listener report."""
+    lines = ["Listening ports on this computer", ""]
+    if not listeners:
+        lines.extend(["No listening sockets were found.", ""])
+        return "\n".join(lines)
+    for item in listeners:
+        owner = f" ({_clean(item.process)}" if item.process else " (process unknown"
+        if item.pid is not None:
+            owner += f", PID {item.pid}"
+        owner += ")"
+        lines.append(
+            f"{item.protocol.upper():3} {_clean(item.address)}:{item.port}{owner}"
+        )
+    lines.extend(["", "TCP entries are listening sockets; UDP entries are bound sockets."])
+    if any(item.process is None for item in listeners):
+        lines.append("Some process names may be hidden unless you run this command with sudo.")
+    return "\n".join(lines)
+
+
+def format_local_ports_json(listeners: Sequence[Listener]) -> str:
+    """Machine-readable local listener report."""
+    return _dumps(
+        {
+            "scope": "local",
+            "listeners": [
+                {
+                    "protocol": item.protocol,
+                    "address": _clean(item.address),
+                    "port": item.port,
+                    "process": _clean(item.process),
+                    "pid": item.pid,
+                }
+                for item in listeners
+            ],
+        }
+    )
 
 
 def format_services(device: Device) -> str:

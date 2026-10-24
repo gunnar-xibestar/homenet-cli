@@ -4,7 +4,7 @@ homenet is a beginner-friendly command for seeing what is on your home network. 
 
 > **Only scan networks you own or have permission to scan.**
 
-That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. When you add `--json`, the reminder is left out and only data is printed.
+That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports <IP>`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. `homenet ports --local` reads this computer's sockets and does not scan the network. When you add `--json`, the reminder is left out and only data is printed.
 
 ## Install with pipx
 
@@ -69,7 +69,7 @@ If a required tool is missing, doctor prints an apt fix: `sudo apt install nmap`
 
 ### Privileges
 
-Scans work as a normal user. No command runs a SYN scan. `ports` is a TCP connect scan (`-sT`) and works without root. `services` uses `-sT -sV --version-light` and works without root too. `router` only requests the gateway's admin page, so root does not change that result. Root adds MAC addresses and makers to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
+Scans work as a normal user. No command runs a SYN scan. `ports <IP>` is a TCP connect scan (`-sT`) and works without root. `ports --local` reads TCP and UDP sockets with `ss`; process names and PIDs are shown when permissions allow. `services` uses `-sT -sV --version-light` and works without root too. `router` only requests the gateway's admin page, so root does not change that result. Root adds MAC addresses and makers to `devices`, `device`, and `baseline`. `new-devices` uses that same sweep, so those fields show up there as well.
 
 ### Running with sudo (Debian/Ubuntu)
 
@@ -113,6 +113,7 @@ homenet whoami-net              # this computer's address on the home network
 homenet devices                 # devices on the home network right now
 homenet device 192.168.1.20     # one device, using an address from devices
 homenet ports 192.168.1.1       # open ports on one device, with a plain-English risk
+homenet ports --local           # TCP and UDP sockets listening on this computer
 homenet services 192.168.1.1    # services on one device, plus program and version when known
 homenet router                  # gateway, and whether its admin page answers
 homenet baseline                # save the current device list
@@ -124,7 +125,7 @@ homenet uninstall               # remove homenet; saved data stays unless --purg
 homenet explain devices         # show the real commands, without running them
 ```
 
-`device` prints the name, IP address, MAC address, and maker, then a Ports section. It uses the same ping sweep as `devices` (`-sn`), which does not scan ports, so that section says `No ports were reported for this device.` `ports` checks the top 100 TCP ports on one address and labels each open port low, medium, or high risk. `services` names the program and version on one address when it can. `router` asks the gateway on ports 80, 443, and 8080 and only requests the page. No open ports, and a router with no admin page, are still a successful run.
+`device` prints the name, IP address, MAC address, and maker, then a Ports section. It uses the same ping sweep as `devices` (`-sn`), which does not scan ports, so that section says `No ports were reported for this device.` `ports <IP>` checks the top 100 TCP ports on one address and labels each open port low, medium, or high risk. `ports --local` runs `ss -ltnp` and `ss -lunp` to show this computer's TCP listening and UDP bound sockets, plus process details when available. Use `homenet explain ports --local` to preview those commands. `services` names the program and version on one address when it can. `router` asks the gateway on ports 80, 443, and 8080 and only requests the page. No open ports, and a router with no admin page, are still a successful run.
 
 `baseline` saves the device list to `$XDG_DATA_HOME/homenet/baseline.json` when that variable is an absolute path, otherwise `~/.local/share/homenet/baseline.json`. `new-devices` compares a fresh sweep with that file. If you have not saved one yet, it says to run `homenet baseline` first.
 
