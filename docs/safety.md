@@ -2,7 +2,7 @@
 
 > **Only scan networks you own or have permission to scan.**
 
-That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. When you add `--json`, the reminder is left out and only data is printed.
+That line is the rule for this tool. Scanning a network you do not own can be illegal. `homenet devices`, `device`, `ports <IP>`, `services`, `router`, `baseline`, and `new-devices` print it before they do any work. `homenet ports --local` reads this computer's sockets and does not scan the network. When you add `--json`, the reminder is left out and only data is printed.
 
 ## See also
 

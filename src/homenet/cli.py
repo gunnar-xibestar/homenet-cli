@@ -6,6 +6,7 @@
 :mod:`homenet.core.devices` and :mod:`homenet.core.baseline`.
 ``ports`` asks :func:`homenet.core.ports.scan_ports` (top 100) and
 :func:`homenet.core.port_notes.notes_for_ports`.
+``ports --local`` asks :func:`homenet.core.local_ports.scan_local_ports`.
 ``services`` asks :func:`homenet.core.ports.scan_services` for one host.
 It does not pass ``allow_subnet``.
 ``router`` asks :func:`homenet.core.router.check_router_admin`.
@@ -115,6 +116,7 @@ from homenet.core import (
     checks,
     devices,
     dns,
+    local_ports,
     netinfo,
     port_notes,
     ports,
@@ -126,6 +128,7 @@ from homenet.core import (
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
 from homenet.core.commands import planned_commands, set_command_hook
+from homenet.core.local_ports import LocalPortsError
 from homenet.core.parser import Device, ParseError
 from homenet.core.runner import NmapError
 from homenet.core.wsl import is_wsl
@@ -143,6 +146,8 @@ from homenet.output import (
     format_error,
     format_error_json,
     format_explain_json,
+    format_local_ports,
+    format_local_ports_json,
     format_ports,
     format_ports_json,
     format_router,
@@ -290,9 +295,9 @@ _COMMANDS: tuple[_Command, ...] = (
     ),
     _Command(
         "ports",
-        "List open ports on one device",
-        "List the open ports on one device and explain the risk in plain English. "
-        "An open port is a door a program is listening on, such as a website or a printer.",
+        "List remote ports or local listeners",
+        "List open ports on a device with nmap, or use --local to show TCP and UDP "
+        "sockets listening on this computer and the owning process when available.",
         "homenet ports 192.168.1.1",
         scan=True,
         ip=True,
@@ -656,6 +661,33 @@ def _run_new_devices(args: argparse.Namespace) -> int:
 
 
 def _run_ports(args: argparse.Namespace) -> int:
+    if args.local:
+        if args.ip:
+            return _fail_message(
+                args,
+                "`--local` does not take an IP address.",
+                "Run `homenet ports --local` to see this computer's listening sockets.",
+                code=2,
+            )
+        try:
+            with _activity(args, "Reading local listening ports…"):
+                listeners = local_ports.scan_local_ports()
+        except local_ports.LocalPortsError as exc:
+            return _fail(args, exc, code=1)
+        if args.json:
+            _print_ok(args, format_local_ports_json(listeners))
+        else:
+            print(format_local_ports(listeners))
+        return 0
+    if not args.ip:
+        # Usage error: same contract as argparse errors (stderr, exit 2).
+        message = "the following arguments are required: ip (or use --local)"
+        hint = "For example: homenet ports 192.168.1.20, or homenet ports --local."
+        if getattr(args, "json", False):
+            print(format_error_json(message, hint), file=sys.stderr)
+        else:
+            print(f"homenet ports: error: {message}\nFix: {hint}", file=sys.stderr)
+        raise SystemExit(2)
     _begin_scan(args)
     target, code = _one_ipv4(args)
     if target is None:
@@ -1458,10 +1490,14 @@ def _supplied_gateway(args: argparse.Namespace, code: int) -> tuple[str | None, 
     return str(address), None
 
 
-def _explain_params(name: str, ip: str | None, network: str | None, gateway: str | None) -> dict:
+def _explain_params(
+    name: str, ip: str | None, network: str | None, gateway: str | None, local: bool = False
+) -> dict:
     if name in _SCAN_COMMANDS:
         return {"local_network": network}
     if name == "ports":
+        if local:
+            return {"local": True}
         return {"target": ip, "local_network": network, "top_ports": 100}
     if name == "services":
         return {
@@ -1479,8 +1515,22 @@ def _run_explain(args: argparse.Namespace) -> int:
     """Print the real commands for one homenet command. Does not scan."""
     name = args.subject
     code = _failure_code(name)
+    if args.local and name != "ports":
+        return _fail_message(
+            args,
+            "`--local` is only for `explain ports`.",
+            "Try `homenet explain ports --local`.",
+            code=2,
+        )
+    if args.local and args.target:
+        return _fail_message(
+            args,
+            "`explain ports --local` does not take an IP address.",
+            "Try `homenet explain ports --local`.",
+            code=2,
+        )
     ip: str | None = None
-    if name in _HOST_COMMANDS:
+    if name in _HOST_COMMANDS and not args.local:
         ip, err = _explain_host(args, name)
         if ip is None:
             return err if err is not None else code
@@ -1501,7 +1551,7 @@ def _run_explain(args: argparse.Namespace) -> int:
 
     network: str | None = None
     gateway: str | None = None
-    if name in _NETWORK_COMMANDS:
+    if name in _NETWORK_COMMANDS and not args.local:
         if supplied is not None:
             network = supplied
             gateway = supplied_gw
@@ -1515,7 +1565,9 @@ def _run_explain(args: argparse.Namespace) -> int:
             gateway = supplied_gw if supplied_gw is not None else detected
 
     try:
-        planned = planned_commands(name, **_explain_params(name, ip, network, gateway))
+        planned = planned_commands(
+            name, **_explain_params(name, ip, network, gateway, local=args.local)
+        )
     except ValueError:
         message, hint = _invalid_target(ip if name in _HOST_COMMANDS else None)
         return _fail_message(args, message, hint, code)
@@ -1524,6 +1576,7 @@ def _run_explain(args: argparse.Namespace) -> int:
         netinfo.NetInfoError,
         speed.SpeedError,
         selfinstall.SelfInstallError,
+        LocalPortsError,
     ) as exc:
         return _fail(args, exc, code)
 
@@ -1563,8 +1616,19 @@ def _add_command(subparsers, spec: _Command, json_mode: bool) -> None:
     if spec.ip:
         parser.add_argument(
             "ip",
+            nargs="?" if spec.name == "ports" else None,
             metavar="IP",
-            help="IP address of the device, for example 192.168.1.20",
+            help=(
+                "IP address of the device, for example 192.168.1.20"
+                if spec.name != "ports"
+                else "IP address to scan; omit with --local"
+            ),
+        )
+    if spec.name == "ports":
+        parser.add_argument(
+            "--local",
+            action="store_true",
+            help="Show this computer's TCP and UDP listening sockets with ss",
         )
     if spec.json:
         parser.add_argument(
@@ -1676,6 +1740,11 @@ def _add_explain(subparsers, json_mode: bool) -> None:
         "--network",
         metavar="CIDR",
         help="Home network to assume, for example 192.168.1.0/24. Skips the ip lookup.",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="For ports, show this computer's listeners instead of planning an nmap scan.",
     )
     parser.add_argument(
         "--gateway",

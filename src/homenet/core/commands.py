@@ -201,8 +201,17 @@ def plan_scan(
 
 
 def plan_ports(
-    target=None, *, local_network=None, top_ports: int = 100, stats_every: int | None = None
+    target=None,
+    *,
+    local_network=None,
+    top_ports: int = 100,
+    stats_every: int | None = None,
+    local: bool = False,
 ) -> list[Command]:
+    if local:
+        from homenet.core.local_ports import plan_local_ports
+
+        return plan_local_ports()
     from homenet.core.ports import build_ports_command
 
     return [
