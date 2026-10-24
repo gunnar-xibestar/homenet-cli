@@ -12,14 +12,14 @@ One line downloads the installer from the latest GitHub release and runs it:
 curl -fsSL https://github.com/gunnar-xibestar/homenet-cli/releases/latest/download/install.sh | sh
 ```
 
-The script is fed to `sh` on standard input, so it reads your answers from the terminal (`/dev/tty`), not from that pipe.
+The script is fed to `sh` on standard input, so it reads your answers from the terminal (`/dev/tty`), not from that pipe. If the download is cut off before the last line, the installer runs nothing and installs nothing.
 
 Here is what it does:
 
 - It reads the machine type with `uname -m`. 64-bit PC (`x86_64` / `amd64`) and 64-bit ARM (`aarch64` / `arm64`) work. Anything else stops, with nothing installed.
 - It downloads `SHA256SUMS` and checks the file it is about to install with `sha256sum` (or `shasum -a 256`). If the checksum does not match, or the file is not listed, it stops and installs nothing.
-- On Debian and Ubuntu it downloads `homenet_<version>_<arch>.deb` and asks before it runs `sudo`. The password prompt comes from sudo itself, not from homenet.
-- On other Linux systems, or when you pass `--user`, it copies a single program to `~/.local/bin/homenet`. That path does not use sudo.
+- On Debian and Ubuntu it downloads `homenet_<version>_<arch>.deb` and asks before it installs. The command it prints uses the full path of that file, so you can run it from any folder. If you say no, or there is no terminal, that path is where the package was left. When you are already root it runs `apt install` without sudo. Otherwise the password prompt comes from sudo itself, not from homenet.
+- On other Linux systems, or when you pass `--user`, it copies a single program to `~/.local/bin/homenet`. That path does not use sudo. It stops if `~/.local`, `~/.local/bin`, or `~/.local/bin/homenet` is a symbolic link, or if that folder is outside your home directory.
 - If `nmap` is missing it prints `sudo apt install nmap` and does not run it. Then it tells you to run `homenet doctor`.
 
 `<version>` comes from the `.deb` name in `SHA256SUMS` (for example `homenet_0.3.0_amd64.deb`). `<arch>` is `amd64` or `arm64`.
@@ -82,7 +82,7 @@ sha256sum -c --ignore-missing SHA256SUMS
 
 ## User install
 
-`--user` always uses the binary in `~/.local/bin`, including on Debian and Ubuntu. It does not run sudo.
+`--user` always uses the binary in `~/.local/bin`, including on Debian and Ubuntu. It does not run sudo. It writes the program to a temporary file in that folder, makes that file runnable, and renames it to `homenet`. If `~/.local`, `~/.local/bin`, or `~/.local/bin/homenet` is a symbolic link, or that folder sits outside your home directory, the installer stops and writes nothing. `HOME` must be set, and it cannot be `/`.
 
 ```bash
 curl -fsSL -o install.sh https://github.com/gunnar-xibestar/homenet-cli/releases/latest/download/install.sh
