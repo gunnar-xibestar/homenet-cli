@@ -4,6 +4,7 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  pull_request: # TEMP: dry-run proof, reverted before merge
 
 permissions:
   contents: read
