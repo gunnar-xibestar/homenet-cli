@@ -29,7 +29,7 @@ docker run --rm \
   bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq --no-install-recommends python3 python3-pip python3-venv binutils >/dev/null
+    apt-get install -y -qq --no-install-recommends python3 python3-pip python3-venv libpython3.10 binutils >/dev/null
     cp -a /src /build
     rm -rf /build/dist /build/build /build/src/*.egg-info
     python3 -m venv /venv
