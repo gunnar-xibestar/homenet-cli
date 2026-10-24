@@ -31,5 +31,5 @@ def test_explain_ports_local_without_ss_is_friendly(monkeypatch, capsys):
 
 
 def test_ipv6_listener_is_bracketed():
-    text = format_local_ports([Listener("tcp", "::", 80), Listener("tcp", "0.0.0.0", 22)])
-    assert "[::]:80" in text and "0.0.0.0:22" in text
+    text = format_local_ports([Listener("tcp", "::", 80), Listener("tcp", "127.0.0.1", 22)])
+    assert "[::]:80" in text and "127.0.0.1:22" in text
