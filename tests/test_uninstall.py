@@ -595,10 +595,16 @@ def test_purge_does_not_escape(case, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda prompt="": "yes")
 
-        assert main(["uninstall", "--yes", "--purge"]) == 0
+        code = main(["uninstall", "--yes", "--purge"])
 
         captured = capsys.readouterr()
-        assert _pip_argv(calls)[:4] == [sys.executable, "-m", "pip", "uninstall"]
+        if case == "unset_home":
+            # Refused up front: nothing is planned, run, or deleted.
+            assert code == 1
+            assert calls == []
+        else:
+            assert code == 0
+            assert _pip_argv(calls)[:4] == [sys.executable, "-m", "pip", "uninstall"]
         for path in survive:
             assert os.path.lexists(path)
             if path.name == "keep.txt":
