@@ -8,15 +8,11 @@ That line is the rule for this tool. Scanning a network you do not own can be il
 
 ## Install
 
-pipx keeps homenet in its own environment and puts the `homenet` command on your PATH. This repository is the package `homenet-cli`. It is not on PyPI. The PyPI project named `homenet` is a different tool.
-
 ```bash
-pipx install "git+https://github.com/gunnar-xibestar/homenet-cli.git"
+curl -fsSL https://github.com/gunnar-xibestar/homenet-cli/releases/latest/download/install.sh | sh
 ```
 
-Then run `homenet --help`.
-
-Distro packages, an SSH or local install, a virtual environment, and nmap are in [Install](docs/install.md). `sudo` will not see a virtual environment's command; see [Sudo and virtual environments](docs/sudo.md).
+What that downloads, how to read the script first, and a manual install are in [Install](docs/install.md). Only scan networks you own or are authorized to scan.
 
 ## Quick start
 
