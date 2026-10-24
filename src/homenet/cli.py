@@ -108,6 +108,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from pathlib import Path
 from typing import TextIO
 
 from homenet import __version__
@@ -896,15 +897,33 @@ def _json_checkouts(
 
 def _run_uninstall(args: argparse.Namespace) -> int:
     """Confirm, then uninstall. Prompts and printing stay here; core deletes files."""
+    purge = bool(getattr(args, "purge", False))
+    if purge:
+        # Before any planning or deletion: HOME must be a real, non-root folder.
+        try:
+            selfinstall.check_purge_home()
+        except selfinstall.SelfInstallError as exc:
+            return _fail(args, exc)
     info = selfinstall.detect_install()
-    if info.command is None:
+    if info.kind == selfinstall.KIND_DEB:
+        return _report_deb(args, info)
+    binary_home: Path | None = None
+    if info.kind == selfinstall.KIND_BINARY and info.binary is not None:
+        binary_home = Path.home()
+        try:
+            selfinstall.check_binary(info.binary, binary_home)
+        except selfinstall.SelfInstallError as exc:
+            return _fail(args, exc)
+    elif info.command is None:
         # Editable, system, and unknown installs, including a checkout that holds
         # the running editable install, stop here with the manual steps.
         return _fail_message(args, info.message, info.hint)
     kept = selfinstall.saved_data_paths()
     kept_text = tuple(str(path) for path in kept)
-    display = _clean(info.command.display()) or ""
-    purge = bool(getattr(args, "purge", False))
+    if info.command is not None:
+        display = _clean(info.command.display()) or ""
+    else:
+        display = f"remove {_clean(str(info.binary)) or ''}"
     plan = selfinstall.plan_purge() if purge else None
     data_paths: list[str] = []
     note: str | None = None
@@ -921,6 +940,8 @@ def _run_uninstall(args: argparse.Namespace) -> int:
             preview_left = plan.data_left
             if plan.data_left and plan.data_dir is not None:
                 preview_dir = str(plan.data_dir)
+    if plan is not None and not plan.blocked and info.binary is not None:
+        data_paths.append(str(info.binary))
     offer, kept_checkouts = _checkout_groups(plan)
     if not getattr(args, "yes", False) and not _stdin_is_tty():
         extra = " --purge" if purge else ""
@@ -981,8 +1002,12 @@ def _run_uninstall(args: argparse.Namespace) -> int:
             delete_checkouts = True
         else:
             note = _KEPT_CHECKOUT_NOTE
+    removed_binary: str | None = None
     try:
-        selfinstall.run_uninstall(info.command)
+        if info.command is not None:
+            selfinstall.run_uninstall(info.command)
+        elif info.binary is not None and binary_home is not None:
+            removed_binary = str(selfinstall.remove_binary(info.binary, home=binary_home))
     except selfinstall.SelfInstallError as exc:
         where = _clean(kept_text[0]) if kept_text else ""
         extra = "Saved data was not removed." if purge else f"Saved data was kept at {where}."
@@ -1008,6 +1033,8 @@ def _run_uninstall(args: argparse.Namespace) -> int:
         if outcome.left:
             left_names = outcome.left
             left_dir = str(outcome.directory)
+    if purge and removed_binary is not None:
+        removed = (*removed, removed_binary)
     removed_checkouts: list[str] = []
     if delete_checkouts and plan is not None and plan.home is not None:
         for item in offer:
@@ -1032,6 +1059,7 @@ def _run_uninstall(args: argparse.Namespace) -> int:
                 checkouts=json_checkouts,
                 removed_checkouts=tuple(removed_checkouts),
                 data_left=left_names,
+                binary=removed_binary,
             ),
         )
     else:
@@ -1046,8 +1074,31 @@ def _run_uninstall(args: argparse.Namespace) -> int:
                 kept_data=left_names,
                 data_dir=left_dir,
                 note=note,
+                removed_binary=None if purge else removed_binary,
             )
         )
+    return 0
+
+
+def _report_deb(args: argparse.Namespace, info: selfinstall.InstallInfo) -> int:
+    """A system package: run nothing, remove nothing, show the apt fix, exit 0."""
+    if getattr(args, "json", False):
+        _print_ok(
+            args,
+            format_uninstall_json(
+                distribution=info.distribution,
+                kind=info.kind,
+                paths=(),
+                removed=(),
+                purge=False,
+                cancelled=False,
+                uninstalled=False,
+                message=info.message,
+                fix_hint=info.hint,
+            ),
+        )
+    else:
+        print(format_error(info.message, info.hint))
     return 0
 
 
@@ -1564,6 +1615,8 @@ def _run_explain(args: argparse.Namespace) -> int:
             detected = (info.gateway or "").strip() or None
             gateway = supplied_gw if supplied_gw is not None else detected
 
+    if name == "uninstall":
+        return _explain_uninstall(args, code)
     try:
         planned = planned_commands(
             name, **_explain_params(name, ip, network, gateway, local=args.local)
@@ -1584,6 +1637,33 @@ def _run_explain(args: argparse.Namespace) -> int:
         print(format_explain_json(name, _command_payloads(planned)))
     else:
         print(_format_explained(planned))
+    return 0
+
+
+def _explain_uninstall(args: argparse.Namespace, code: int) -> int:
+    """Planned uninstall commands. A deb or binary install runs none, so say why."""
+    try:
+        planned = planned_commands("uninstall")
+    except selfinstall.SelfInstallError as exc:
+        return _fail(args, exc, code)
+    info = selfinstall.detect_install()
+    note: str | None = None
+    hint: str | None = None
+    if info.kind == selfinstall.KIND_DEB:
+        note, hint = info.message, info.hint
+    elif info.kind == selfinstall.KIND_BINARY:
+        note = f"No command runs. homenet removes only its own file: {info.binary}"
+    if args.json:
+        print(
+            format_explain_json("uninstall", _command_payloads(planned), note=note, fix_hint=hint)
+        )
+        return 0
+    blocks = [_format_explained(planned)] if planned else []
+    if note is not None:
+        blocks.append(_clean(note) or "")
+    if hint:
+        blocks.append(f"Fix: {_clean(hint) or ''}")
+    print("\n\n".join(blocks))
     return 0
 
 

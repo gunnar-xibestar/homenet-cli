@@ -148,6 +148,20 @@ KIND_USER = "user"
 KIND_SYSTEM = "system"
 KIND_EDITABLE = "editable"
 KIND_UNKNOWN = "unknown"
+KIND_DEB = "deb"
+KIND_BINARY = "binary"
+
+# Written by the Debian package. Its stripped content is exactly ``deb``.
+DEB_MARKER = Path("/usr/lib/homenet/install-method")
+_DEB_MARKER_LIMIT = 4096
+DEB_HINT = "Remove it with `sudo apt remove homenet`."
+DEB_MESSAGE = (
+    "This copy of homenet was installed as a system package, so homenet did not remove it."
+)
+HOME_ROOT_MESSAGE = (
+    "HOME points at the root folder (/), so homenet did not plan or delete anything."
+)
+HOME_FIX_HINT = "Set HOME to your own home folder, then run `homenet uninstall --purge` again."
 
 _AUTOMATIC = frozenset({KIND_VENV, KIND_PIPX, KIND_USER})
 
@@ -165,7 +179,9 @@ class InstallInfo:
     """How this process's homenet was installed.
 
     ``command`` is set only for a venv, pipx, or user-site install. System,
-    editable, and unknown installs stay ``None`` so nothing is executed.
+    editable, deb, binary, and unknown installs stay ``None`` so nothing is
+    executed. ``binary`` is the resolved executable of a frozen binary in
+    ``~/.local/bin``; that one file is the only thing a binary uninstall removes.
     """
 
     kind: str
@@ -173,6 +189,7 @@ class InstallInfo:
     command: Command | None
     message: str
     hint: str | None = None
+    binary: Path | None = None
 
     @property
     def automatic(self) -> bool:
@@ -341,10 +358,14 @@ def detect_install(
     prefix: str | None = None,
     base_prefix: str | None = None,
     executable: str | None = None,
+    marker: Path | None = None,
+    frozen: bool | None = None,
 ) -> InstallInfo:
     """Classify this install. Runs nothing.
 
-    Signals, in order: ``direct_url.json`` editable, the pipx home (env or
+    Signals, in order: the deb marker file (``marker``, default
+    :data:`DEB_MARKER`) whose stripped content is ``deb``; a frozen executable
+    that resolves inside ``~/.local/bin``; then ``direct_url.json`` editable, the pipx home (env or
     ``~/.local/pipx``), ``sys.prefix`` against ``sys.base_prefix``, then
     :func:`site.getusersitepackages`. Anything else found on the system
     prefix is system/apt. A missing distribution is unknown.
@@ -353,6 +374,12 @@ def detect_install(
     prefix = sys.prefix if prefix is None else prefix
     base_prefix = sys.base_prefix if base_prefix is None else base_prefix
     executable = sys.executable if executable is None else executable
+    if is_deb_install(DEB_MARKER if marker is None else marker):
+        return InstallInfo(KIND_DEB, DIST_NAME, None, DEB_MESSAGE, DEB_HINT)
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    binary = _frozen_binary(executable, env) if frozen else None
+    if binary is not None:
+        return InstallInfo(KIND_BINARY, DIST_NAME, None, "", None, binary)
     try:
         dist = distribution(DIST_NAME)
     except PackageNotFoundError:
@@ -369,9 +396,110 @@ def detect_install(
     return InstallInfo(kind, DIST_NAME, None, message, hint)
 
 
+def is_deb_install(marker: Path = DEB_MARKER) -> bool:
+    """True when ``marker`` is a regular file whose stripped content is ``deb``."""
+    try:
+        info = os.stat(marker)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _DEB_MARKER_LIMIT:
+            return False
+        text = Path(marker).read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
+    return text.strip() == "deb"
+
+
+def _local_bin(home: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(home))) / ".local" / "bin"
+
+
+def _frozen_binary(executable: str, environ: Mapping[str, str]) -> Path | None:
+    """The resolved executable when it is a file inside ``~/.local/bin``, else None."""
+    home = _home_from_env(environ, None)
+    if home is None or not executable:
+        return None
+    try:
+        resolved = Path(executable).resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file() or not _within(resolved, _local_bin(home)):
+        return None
+    return resolved
+
+
+def check_binary(path: Path, home: Path) -> None:
+    """Raise unless ``path`` is a regular file directly inside ``home/.local/bin``.
+
+    A symbolic link, at the file or any folder from ``home`` down, is refused,
+    so a link that points elsewhere is never followed.
+    """
+    refusal = SelfInstallError(
+        f"{path} is not a homenet binary inside ~/.local/bin, so it was not removed.",
+        "homenet only removes its own executable file from ~/.local/bin. "
+        "Delete it yourself if you still want it gone.",
+    )
+    root = _home_from_env({}, home)
+    if root is None or _home_is_root(root):
+        raise refusal
+    target = Path(os.path.abspath(os.fspath(path)))
+    if target.parent != _local_bin(root) or not _contained(target, root):
+        raise refusal
+    if _has_symlink_component(target, root):
+        raise refusal
+    try:
+        info = os.lstat(target)
+    except OSError as exc:
+        raise refusal from exc
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise refusal
+
+
+def remove_binary(path: Path, *, home: Path) -> Path:
+    """Delete one frozen homenet binary after :func:`check_binary`. Returns the path.
+
+    The folder is opened with ``O_NOFOLLOW`` from ``home`` down, and only a
+    regular file on the same device is unlinked. Nothing else is touched.
+    """
+    check_binary(path, home)
+    target = Path(os.path.abspath(os.fspath(path)))
+    parent, directory, _name = _open_chain(home, target.parent)
+    try:
+        dev = os.fstat(directory).st_dev
+        if not _unlink_regular(directory, target.name, dev):
+            raise _changed(target)
+    except OSError as exc:
+        raise _delete_error(target, exc) from exc
+    finally:
+        os.close(directory)
+        os.close(parent)
+    return target
+
+
+def _home_is_root(home: Path) -> bool:
+    try:
+        return Path(home).resolve() == Path("/")
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
+def check_purge_home(environ: Mapping[str, str] | None = None) -> None:
+    """Refuse ``--purge`` when ``HOME`` is unset, empty, ``/``, or resolves to ``/``."""
+    env = os.environ if environ is None else environ
+    root = _home_from_env(env, None)
+    if root is None:
+        raise SelfInstallError(HOME_UNSET_MESSAGE, HOME_FIX_HINT)
+    if _home_is_root(root):
+        raise SelfInstallError(HOME_ROOT_MESSAGE, HOME_FIX_HINT)
+
+
 def plan_uninstall() -> list[Command]:
-    """The uninstall command, or :class:`SelfInstallError` when nothing may run."""
+    """The uninstall command, or :class:`SelfInstallError` when nothing may run.
+
+    A deb install plans nothing (the fix is apt). A binary install removes one
+    file and runs no command, so it plans nothing either.
+    """
     info = detect_install()
+    if info.kind in {KIND_DEB, KIND_BINARY}:
+        return []
     if info.command is None:
         raise SelfInstallError(info.message, info.hint)
     return [info.command]
