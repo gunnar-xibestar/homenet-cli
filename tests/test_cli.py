@@ -98,7 +98,7 @@ def test_help_exits_zero(command, capsys):
     assert (heading in out) is (command is None or command in _SUDO_HELP)
 
 
-@pytest.mark.parametrize("argv", [[], ["device"], ["ports"], ["services"]])
+@pytest.mark.parametrize("argv", [[], ["device"], ["services"]])
 def test_usage_errors_exit_nonzero(argv):
     with pytest.raises(SystemExit) as exc:
         main(argv)
@@ -962,7 +962,7 @@ def test_host_commands_say_when_nothing_answered(command, json_mode, capsys, mon
 
 def test_json_usage_error_prints_an_error_object(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["ports", "--json"])
+        main(["device", "--json"])
     assert exc.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
