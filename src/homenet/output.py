@@ -690,6 +690,12 @@ def format_ports_json(device: Device, notes: Sequence[PortNote]) -> str:
     return _dumps(payload)
 
 
+def _endpoint(address: str) -> str:
+    """Bracket IPv6 addresses so the port stays readable, as in [::]:80."""
+    text = _clean(address)
+    return f"[{text}]" if ":" in text else text
+
+
 def format_local_ports(listeners: Sequence[Listener]) -> str:
     """Readable local TCP and UDP listener report."""
     lines = ["Listening ports on this computer", ""]
@@ -701,7 +707,7 @@ def format_local_ports(listeners: Sequence[Listener]) -> str:
         if item.pid is not None:
             owner += f", PID {item.pid}"
         owner += ")"
-        lines.append(f"{item.protocol.upper():3} {_clean(item.address)}:{item.port}{owner}")
+        lines.append(f"{item.protocol.upper():3} {_endpoint(item.address)}:{item.port}{owner}")
     lines.extend(["", "TCP entries are listening sockets; UDP entries are bound sockets."])
     if any(item.process is None for item in listeners):
         lines.append("Some process names may be hidden unless you run this command with sudo.")

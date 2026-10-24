@@ -128,6 +128,7 @@ from homenet.core import (
 from homenet.core.baseline import BaselineError
 from homenet.core.checks import CheckResult
 from homenet.core.commands import planned_commands, set_command_hook
+from homenet.core.local_ports import LocalPortsError
 from homenet.core.parser import Device, ParseError
 from homenet.core.runner import NmapError
 from homenet.core.wsl import is_wsl
@@ -1515,9 +1516,19 @@ def _run_explain(args: argparse.Namespace) -> int:
     name = args.subject
     code = _failure_code(name)
     if args.local and name != "ports":
-        return _fail_message(args, "`--local` is only for `explain ports`.", code=2)
+        return _fail_message(
+            args,
+            "`--local` is only for `explain ports`.",
+            "Try `homenet explain ports --local`.",
+            code=2,
+        )
     if args.local and args.target:
-        return _fail_message(args, "`explain ports --local` does not take an IP address.", code=2)
+        return _fail_message(
+            args,
+            "`explain ports --local` does not take an IP address.",
+            "Try `homenet explain ports --local`.",
+            code=2,
+        )
     ip: str | None = None
     if name in _HOST_COMMANDS and not args.local:
         ip, err = _explain_host(args, name)
@@ -1565,6 +1576,7 @@ def _run_explain(args: argparse.Namespace) -> int:
         netinfo.NetInfoError,
         speed.SpeedError,
         selfinstall.SelfInstallError,
+        LocalPortsError,
     ) as exc:
         return _fail(args, exc, code)
 
