@@ -54,85 +54,74 @@ def _no_commands(monkeypatch) -> list:
 
 @pytest.mark.parametrize(
     ("content", "expected"),
-    [("deb", True), ("  deb\n", True), ("pip", False), ("debian", False), ("", False)],
+    [
+        ("deb", True),
+        ("  deb\n", True),
+        ("pip", False),
+        ("debian", False),
+        ("", False),
+        (None, False),
+    ],
 )
 def test_deb_marker_content(content, expected, tmp_path):
+    """Only a marker whose stripped content is exactly ``deb`` counts. None is absent."""
     marker = tmp_path / "install-method"
-    marker.write_text(content, encoding="utf-8")
+    if content is not None:
+        marker.write_text(content, encoding="utf-8")
     assert selfinstall.is_deb_install(marker) is expected
+    info = selfinstall.detect_install(marker=marker, frozen=False)
+    assert (info.kind == selfinstall.KIND_DEB) is expected
+    if expected:
+        assert info.command is None
+        assert "sudo apt remove homenet" in info.hint
 
 
-def test_deb_marker_absent(tmp_path):
-    assert selfinstall.is_deb_install(tmp_path / "missing") is False
-    info = selfinstall.detect_install(marker=tmp_path / "missing", frozen=False)
-    assert info.kind != selfinstall.KIND_DEB
-
-
-def test_detect_deb(tmp_path):
-    marker = tmp_path / "install-method"
-    marker.write_text("deb\n", encoding="utf-8")
-    info = selfinstall.detect_install(marker=marker)
-    assert info.kind == selfinstall.KIND_DEB
-    assert info.command is None
-    assert "sudo apt remove homenet" in info.hint
-
-
-def test_deb_uninstall_text(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("as_json", [False, True])
+def test_deb_uninstall_hint(as_json, monkeypatch, tmp_path, capsys):
     home = _home(monkeypatch, tmp_path)
     _deb(monkeypatch, tmp_path)
     calls = _no_commands(monkeypatch)
     data = home / "xdg" / "homenet" / "baseline.json"
     data.parent.mkdir(parents=True)
     data.write_text("{}\n", encoding="utf-8")
+    argv = ["uninstall", "--yes", "--purge"] + (["--json"] if as_json else [])
 
-    assert main(["uninstall", "--yes", "--purge"]) == 0
+    assert main(argv) == 0
 
     out = capsys.readouterr().out
-    assert "system package" in out
-    assert "Fix: Remove it with `sudo apt remove homenet`." in out
     assert calls == []
     assert data.is_file()
+    if as_json:
+        payload = json.loads(out)
+        assert payload["install"] == "deb"
+        assert payload["uninstalled"] is False
+        assert payload["removed_paths"] == []
+        assert payload["binary"] is None
+        assert "sudo apt remove homenet" in payload["fix_hint"]
+        assert "system package" in payload["message"]
+    else:
+        assert "system package" in out
+        assert "Fix: Remove it with `sudo apt remove homenet`." in out
 
 
-def test_deb_uninstall_json(monkeypatch, tmp_path, capsys):
-    _home(monkeypatch, tmp_path)
-    _deb(monkeypatch, tmp_path)
-    _no_commands(monkeypatch)
-
-    assert main(["uninstall", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["install"] == "deb"
-    assert payload["uninstalled"] is False
-    assert payload["removed_paths"] == []
-    assert payload["binary"] is None
-    assert "sudo apt remove homenet" in payload["fix_hint"]
-    assert "system package" in payload["message"]
-
-
-def test_detect_binary(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [("frozen_in_local_bin", True), ("frozen_outside", False), ("not_frozen", False)],
+)
+def test_detect_binary(case, expected, monkeypatch, tmp_path):
     home = _home(monkeypatch, tmp_path)
     exe = _binary(monkeypatch, home)
-    info = selfinstall.detect_install()
-    assert info.kind == selfinstall.KIND_BINARY
-    assert info.command is None
-    assert info.binary == exe.resolve()
-
-
-def test_frozen_outside_local_bin_is_not_binary(monkeypatch, tmp_path):
-    _home(monkeypatch, tmp_path)
-    other = tmp_path / "opt" / "homenet"
-    other.parent.mkdir()
-    other.write_bytes(b"x")
-    info = selfinstall.detect_install(executable=str(other), frozen=True)
-    assert info.kind != selfinstall.KIND_BINARY
-
-
-def test_not_frozen_is_not_binary(monkeypatch, tmp_path):
-    home = _home(monkeypatch, tmp_path)
-    exe = _binary(monkeypatch, home)
-    info = selfinstall.detect_install(executable=str(exe), frozen=False)
-    assert info.kind != selfinstall.KIND_BINARY
+    if case == "frozen_outside":
+        exe = tmp_path / "opt" / "homenet"
+        exe.parent.mkdir()
+        exe.write_bytes(b"x")
+    info = selfinstall.detect_install(executable=str(exe), frozen=case != "not_frozen")
+    assert (info.kind == selfinstall.KIND_BINARY) is expected
+    if expected:
+        assert info.command is None
+        assert info.binary == exe.resolve()
+        st = os.lstat(exe)
+        assert info.binary_identity == (st.st_dev, st.st_ino)
 
 
 def test_binary_uninstall_removes_only_its_file(monkeypatch, tmp_path, capsys):
@@ -167,45 +156,75 @@ def test_binary_uninstall_decline_keeps_file(monkeypatch, tmp_path, capsys):
     assert "Nothing was removed." in capsys.readouterr().out
 
 
-def test_binary_refuses_outside_local_bin(monkeypatch, tmp_path):
+def _identity(path: Path) -> tuple[int, int]:
+    st = os.lstat(path)
+    return st.st_dev, st.st_ino
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "home_bin",
+        "outside_home",
+        "symlink_file",
+        "symlinked_bin_dir",
+        "symlinked_local_dir",
+        "swapped_file",
+    ],
+)
+def test_binary_removal_refuses(case, monkeypatch, tmp_path):
+    """Only the detected regular file directly in a real ~/.local/bin is removed."""
     home = _home(monkeypatch, tmp_path)
-    elsewhere = home / "bin" / "homenet"
-    elsewhere.parent.mkdir()
-    elsewhere.write_bytes(b"x")
-    with pytest.raises(selfinstall.SelfInstallError):
-        selfinstall.remove_binary(elsewhere, home=home)
-    outside = tmp_path / "homenet"
-    outside.write_bytes(b"x")
-    with pytest.raises(selfinstall.SelfInstallError):
-        selfinstall.remove_binary(outside, home=home)
-    assert elsewhere.is_file() and outside.is_file()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "homenet"
+    victim.write_text("keep\n", encoding="utf-8")
+    identity = _identity(victim)
+    survivors = [victim]
+    if case == "home_bin":
+        target = home / "bin" / "homenet"
+        target.parent.mkdir()
+        target.write_text("keep\n", encoding="utf-8")
+        identity = _identity(target)
+        survivors.append(target)
+    elif case == "outside_home":
+        target = victim
+    elif case == "symlink_file":
+        target = home / ".local" / "bin" / "homenet"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(victim)
+    elif case == "symlinked_bin_dir":
+        (home / ".local").mkdir()
+        (home / ".local" / "bin").symlink_to(outside, target_is_directory=True)
+        target = home / ".local" / "bin" / "homenet"
+    elif case == "symlinked_local_dir":
+        (outside / "bin").mkdir()
+        inner = outside / "bin" / "homenet"
+        inner.write_text("keep\n", encoding="utf-8")
+        identity = _identity(inner)
+        survivors.append(inner)
+        (home / ".local").symlink_to(outside, target_is_directory=True)
+        target = home / ".local" / "bin" / "homenet"
+    else:
+        target = _binary(monkeypatch, home)
+        identity = _identity(target)
+        # Write the stranger first, then rename over: the old inode is still
+        # alive while the new one is made, so the two cannot share an inode.
+        stranger = target.parent / "stranger"
+        stranger.write_text("NOT OURS\n", encoding="utf-8")
+        os.replace(stranger, target)
+        survivors.append(target)
+        assert _identity(target) != identity
+    texts = {path: path.read_text(encoding="utf-8") for path in survivors}
 
+    with pytest.raises(selfinstall.SelfInstallError) as caught:
+        selfinstall.remove_binary(target, home=home, identity=identity)
 
-def test_binary_refuses_symlink(monkeypatch, tmp_path):
-    home = _home(monkeypatch, tmp_path)
-    target = tmp_path / "victim"
-    target.write_text("keep\n", encoding="utf-8")
-    bindir = home / ".local" / "bin"
-    bindir.mkdir(parents=True)
-    link = bindir / "homenet"
-    link.symlink_to(target)
-    with pytest.raises(selfinstall.SelfInstallError):
-        selfinstall.remove_binary(link, home=home)
-    assert link.is_symlink()
-    assert target.read_text(encoding="utf-8") == "keep\n"
-
-
-def test_binary_refuses_symlinked_bin_dir(monkeypatch, tmp_path):
-    home = _home(monkeypatch, tmp_path)
-    real = tmp_path / "realbin"
-    real.mkdir()
-    exe = real / "homenet"
-    exe.write_bytes(b"x")
-    (home / ".local").mkdir()
-    (home / ".local" / "bin").symlink_to(real, target_is_directory=True)
-    with pytest.raises(selfinstall.SelfInstallError):
-        selfinstall.remove_binary(home / ".local" / "bin" / "homenet", home=home)
-    assert exe.is_file()
+    assert caught.value.hint
+    for path, text in texts.items():
+        assert path.read_text(encoding="utf-8") == text
+    if case == "symlink_file":
+        assert target.is_symlink()
 
 
 def test_binary_uninstall_cli_refuses_symlinked_executable(monkeypatch, tmp_path, capsys):
@@ -243,84 +262,74 @@ def test_purge_with_binary_adds_only_that_path(monkeypatch, tmp_path, capsys):
         [str(data), str(data.parent), str(exe.resolve())]
     )
     assert payload["binary"] == str(exe.resolve())
+    assert payload["message"] is None
+    assert payload["fix_hint"] is None
     assert not exe.exists() and not data.exists()
     assert neighbor.is_file()
     assert (home / ".local" / "bin").is_dir()
 
 
-def _guard_no_planning(monkeypatch) -> None:
-    def boom(*args, **kwargs):
-        raise AssertionError("purge must refuse before planning")
+def _guard_no_planning(monkeypatch) -> list[str]:
+    hits: list[str] = []
 
-    monkeypatch.setattr(selfinstall, "plan_purge", boom)
-    monkeypatch.setattr(selfinstall, "detect_install", boom)
-    monkeypatch.setattr(selfinstall, "remove_data_dir", boom)
-    monkeypatch.setattr(selfinstall, "remove_binary", boom)
+    def spy(name):
+        def boom(*args, **kwargs):
+            hits.append(name)
+            raise AssertionError(f"purge must refuse before {name}")
+
+        return boom
+
+    for name in ("plan_purge", "detect_install", "remove_data_dir", "remove_binary", "run_command"):
+        monkeypatch.setattr(selfinstall, name, spy(name))
+    monkeypatch.setattr(os, "walk", spy("os.walk"))
+    return hits
 
 
-@pytest.mark.parametrize("case", ["root", "symlink_to_root", "empty", "unset", "spaces"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "root",
+        "double_slash",
+        "slash_dot",
+        "symlink_to_root",
+        "empty",
+        "unset",
+        "spaces",
+        "relative",
+        "dot_relative",
+    ],
+)
 def test_purge_refuses_bad_home(case, monkeypatch, tmp_path, capsys):
-    if case == "root":
-        monkeypatch.setenv("HOME", "/")
-    elif case == "symlink_to_root":
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "relhome").mkdir()
+    values = {
+        "root": "/",
+        "double_slash": "//",
+        "slash_dot": "/./",
+        "empty": "",
+        "spaces": "   ",
+        "relative": "relhome",
+        "dot_relative": "./relhome",
+    }
+    if case == "symlink_to_root":
         link = tmp_path / "rootlink"
         link.symlink_to("/", target_is_directory=True)
         monkeypatch.setenv("HOME", str(link))
-    elif case == "empty":
-        monkeypatch.setenv("HOME", "")
-    elif case == "spaces":
-        monkeypatch.setenv("HOME", "   ")
-    else:
+    elif case == "unset":
         monkeypatch.delenv("HOME", raising=False)
-    _guard_no_planning(monkeypatch)
+    else:
+        monkeypatch.setenv("HOME", values[case])
+    hits = _guard_no_planning(monkeypatch)
 
     assert main(["uninstall", "--yes", "--purge"]) == 1
 
     out = capsys.readouterr().out
+    assert hits == []
     assert "Fix: Set HOME to your own home folder" in out
     assert "Traceback" not in out
 
 
-def test_purge_refuses_bad_home_json(monkeypatch, capsys):
-    monkeypatch.setenv("HOME", "/")
-    _guard_no_planning(monkeypatch)
-    assert main(["uninstall", "--yes", "--purge", "--json"]) == 1
-    err = json.loads(capsys.readouterr().err)
-    assert set(err) == {"error", "fix_hint"}
-    assert "root folder" in err["error"]
-
-
-def test_explain_deb(monkeypatch, tmp_path, capsys):
-    _home(monkeypatch, tmp_path)
-    _deb(monkeypatch, tmp_path)
-    assert main(["explain", "uninstall"]) == 0
-    out = capsys.readouterr().out
-    assert "$ " not in out
-    assert "sudo apt remove homenet" in out
-
-    assert main(["explain", "uninstall", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["commands"] == []
-    assert "sudo apt remove homenet" in payload["fix_hint"]
-
-
-def test_explain_binary(monkeypatch, tmp_path, capsys):
-    home = _home(monkeypatch, tmp_path)
-    exe = _binary(monkeypatch, home)
-    assert main(["explain", "uninstall"]) == 0
-    out = capsys.readouterr().out
-    assert "$ " not in out
-    assert str(exe.resolve()) in out
-    assert exe.is_file()
-
-    assert main(["explain", "uninstall", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["commands"] == []
-    assert str(exe.resolve()) in payload["note"]
-
-
-def test_explain_pip(monkeypatch, tmp_path, capsys):
-    _home(monkeypatch, tmp_path)
+def _as_pip(monkeypatch, tmp_path: Path) -> None:
     prefix = tmp_path / "venv"
 
     class _Dist:
@@ -336,13 +345,36 @@ def test_explain_pip(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(selfinstall, "_user_site", lambda: None)
     monkeypatch.setattr(selfinstall, "distribution", lambda name: _Dist())
 
+
+@pytest.mark.parametrize("method", ["deb", "binary", "pip"])
+def test_explain_uninstall(method, monkeypatch, tmp_path, capsys):
+    home = _home(monkeypatch, tmp_path)
+    exe = None
+    if method == "deb":
+        _deb(monkeypatch, tmp_path)
+    elif method == "binary":
+        exe = _binary(monkeypatch, home)
+    else:
+        _as_pip(monkeypatch, tmp_path)
+
     assert main(["explain", "uninstall"]) == 0
     out = capsys.readouterr().out
-    assert "pip uninstall -y homenet-cli" in out
-
     assert main(["explain", "uninstall", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    (cmd,) = payload["commands"]
-    assert cmd["argv"][-4:] == ["pip", "uninstall", "-y", "homenet-cli"]
-    assert "note" not in payload
-    assert os.path.isabs(cmd["argv"][0])
+
+    if method == "pip":
+        assert "pip uninstall -y homenet-cli" in out
+        (cmd,) = payload["commands"]
+        assert cmd["argv"][-4:] == ["pip", "uninstall", "-y", "homenet-cli"]
+        assert os.path.isabs(cmd["argv"][0])
+        assert "note" not in payload
+        return
+    assert "$ " not in out
+    assert payload["commands"] == []
+    if method == "deb":
+        assert "sudo apt remove homenet" in out
+        assert "sudo apt remove homenet" in payload["fix_hint"]
+    else:
+        assert str(exe.resolve()) in out
+        assert str(exe.resolve()) in payload["note"]
+        assert exe.is_file()

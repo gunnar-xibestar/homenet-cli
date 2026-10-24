@@ -170,6 +170,7 @@ lookup result. ``upstream`` is filled when a server is a local resolver.
     {"cancelled": bool, "checkouts": [{"kept_reason": str|null, "path": str}, ...],
      "data_kept": bool, "data_left": [str, ...], "data_paths": [str, ...],
      "binary": str|null, "distribution": str,
+     "message": str|null, "fix_hint": str|null,
      "install": "venv"|"pipx"|"user"|"binary"|"deb", "purged": bool,
      "removed_checkouts": [str, ...], "removed_paths": [str, ...],
      "uninstalled": bool}
@@ -404,7 +405,7 @@ def format_uninstall_json(
     """JSON for ``homenet uninstall --json``.
 
     ``binary`` is the removed executable of a binary install. ``message`` and
-    ``fix_hint`` are set for a deb install, which removes nothing.
+    ``fix_hint`` are always present: null unless set (a deb install sets both).
 
     Shape: ``cancelled``, ``checkouts``, ``data_kept``, ``data_left``,
     ``data_paths``, ``distribution``, ``install``, ``purged``,
@@ -434,10 +435,9 @@ def format_uninstall_json(
         "removed_paths": [_clean(path) or "" for path in removed],
         "uninstalled": bool(uninstalled and not cancelled),
         "binary": _clean(binary) if binary else None,
+        "message": _clean(message) if message else None,
+        "fix_hint": _clean(fix_hint) if fix_hint else None,
     }
-    if message is not None:
-        payload["message"] = _clean(message) or ""
-        payload["fix_hint"] = _clean(fix_hint) if fix_hint else None
     return _dumps(payload)
 
 

@@ -161,6 +161,10 @@ DEB_MESSAGE = (
 HOME_ROOT_MESSAGE = (
     "HOME points at the root folder (/), so homenet did not plan or delete anything."
 )
+HOME_RELATIVE_MESSAGE = (
+    "HOME is not an absolute path (it must start with /), "
+    "so homenet did not plan or delete anything."
+)
 HOME_FIX_HINT = "Set HOME to your own home folder, then run `homenet uninstall --purge` again."
 
 _AUTOMATIC = frozenset({KIND_VENV, KIND_PIPX, KIND_USER})
@@ -182,6 +186,7 @@ class InstallInfo:
     editable, deb, binary, and unknown installs stay ``None`` so nothing is
     executed. ``binary`` is the resolved executable of a frozen binary in
     ``~/.local/bin``; that one file is the only thing a binary uninstall removes.
+    ``binary_identity`` is its ``st_dev, st_ino`` (lstat) captured at detection.
     """
 
     kind: str
@@ -190,6 +195,7 @@ class InstallInfo:
     message: str
     hint: str | None = None
     binary: Path | None = None
+    binary_identity: tuple[int, int] | None = None
 
     @property
     def automatic(self) -> bool:
@@ -379,7 +385,13 @@ def detect_install(
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     binary = _frozen_binary(executable, env) if frozen else None
     if binary is not None:
-        return InstallInfo(KIND_BINARY, DIST_NAME, None, "", None, binary)
+        try:
+            info = os.lstat(binary)
+        except OSError:
+            info = None
+        if info is not None and stat.S_ISREG(info.st_mode):
+            identity = (info.st_dev, info.st_ino)
+            return InstallInfo(KIND_BINARY, DIST_NAME, None, "", None, binary, identity)
     try:
         dist = distribution(DIST_NAME)
     except PackageNotFoundError:
@@ -453,25 +465,38 @@ def check_binary(path: Path, home: Path) -> None:
         raise refusal
 
 
-def remove_binary(path: Path, *, home: Path) -> Path:
+def remove_binary(path: Path, *, home: Path, identity: tuple[int, int]) -> Path:
     """Delete one frozen homenet binary after :func:`check_binary`. Returns the path.
 
-    The folder is opened with ``O_NOFOLLOW`` from ``home`` down, and only a
-    regular file on the same device is unlinked. Nothing else is touched.
+    The folder is opened with ``O_NOFOLLOW`` from ``home`` down. The file is
+    unlinked only when it is still a regular file whose ``st_dev, st_ino``
+    match ``identity`` from detection. Nothing else is touched.
     """
     check_binary(path, home)
     target = Path(os.path.abspath(os.fspath(path)))
     parent, directory, _name = _open_chain(home, target.parent)
     try:
-        dev = os.fstat(directory).st_dev
-        if not _unlink_regular(directory, target.name, dev):
-            raise _changed(target)
+        try:
+            info = os.stat(target.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise _binary_changed(target) from exc
+        same = (info.st_dev, info.st_ino) == tuple(identity)
+        if not same or not stat.S_ISREG(info.st_mode):
+            raise _binary_changed(target)
+        os.unlink(target.name, dir_fd=directory)
     except OSError as exc:
         raise _delete_error(target, exc) from exc
     finally:
         os.close(directory)
         os.close(parent)
     return target
+
+
+def _binary_changed(path: Path) -> SelfInstallError:
+    return SelfInstallError(
+        f"{path} changed after homenet checked it, so it was not removed.",
+        "Delete that file yourself if you are sure it is homenet.",
+    )
 
 
 def _home_is_root(home: Path) -> bool:
@@ -482,11 +507,15 @@ def _home_is_root(home: Path) -> bool:
 
 
 def check_purge_home(environ: Mapping[str, str] | None = None) -> None:
-    """Refuse ``--purge`` when ``HOME`` is unset, empty, ``/``, or resolves to ``/``."""
+    """Refuse ``--purge`` when ``HOME`` is unset, empty, relative, or resolves to ``/``."""
     env = os.environ if environ is None else environ
-    root = _home_from_env(env, None)
-    if root is None:
+    raw = env.get("HOME")
+    text = "" if raw is None else str(raw).strip()
+    if not text:
         raise SelfInstallError(HOME_UNSET_MESSAGE, HOME_FIX_HINT)
+    if not os.path.isabs(text):
+        raise SelfInstallError(HOME_RELATIVE_MESSAGE, HOME_FIX_HINT)
+    root = Path(text)
     if _home_is_root(root):
         raise SelfInstallError(HOME_ROOT_MESSAGE, HOME_FIX_HINT)
 

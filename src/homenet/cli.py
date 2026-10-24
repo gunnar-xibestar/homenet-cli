@@ -908,7 +908,7 @@ def _run_uninstall(args: argparse.Namespace) -> int:
     if info.kind == selfinstall.KIND_DEB:
         return _report_deb(args, info)
     binary_home: Path | None = None
-    if info.kind == selfinstall.KIND_BINARY and info.binary is not None:
+    if info.kind == selfinstall.KIND_BINARY and info.binary is not None and info.binary_identity:
         binary_home = Path.home()
         try:
             selfinstall.check_binary(info.binary, binary_home)
@@ -1006,8 +1006,13 @@ def _run_uninstall(args: argparse.Namespace) -> int:
     try:
         if info.command is not None:
             selfinstall.run_uninstall(info.command)
-        elif info.binary is not None and binary_home is not None:
-            removed_binary = str(selfinstall.remove_binary(info.binary, home=binary_home))
+        elif (
+            info.binary is not None and info.binary_identity is not None and binary_home is not None
+        ):
+            gone = selfinstall.remove_binary(
+                info.binary, home=binary_home, identity=info.binary_identity
+            )
+            removed_binary = str(gone)
     except selfinstall.SelfInstallError as exc:
         where = _clean(kept_text[0]) if kept_text else ""
         extra = "Saved data was not removed." if purge else f"Saved data was kept at {where}."
