@@ -13,6 +13,10 @@ The saved device snapshot stays. `--purge` deletes `baseline.json` and removes t
 
 A system package or an editable checkout is not removed. `uninstall` does not need sudo.
 
+## A release package or ~/.local/bin
+
+`homenet uninstall` does not remove a `.deb`, and it does not remove a program copied to `~/.local/bin`. How to remove those, and the `sudo apt remove homenet` command, are in [Install](install.md#uninstall).
+
 ## See also
 
 - [Exit codes](exit-codes.md)
