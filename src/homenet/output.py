@@ -701,9 +701,7 @@ def format_local_ports(listeners: Sequence[Listener]) -> str:
         if item.pid is not None:
             owner += f", PID {item.pid}"
         owner += ")"
-        lines.append(
-            f"{item.protocol.upper():3} {_clean(item.address)}:{item.port}{owner}"
-        )
+        lines.append(f"{item.protocol.upper():3} {_clean(item.address)}:{item.port}{owner}")
     lines.extend(["", "TCP entries are listening sockets; UDP entries are bound sockets."])
     if any(item.process is None for item in listeners):
         lines.append("Some process names may be hidden unless you run this command with sudo.")
