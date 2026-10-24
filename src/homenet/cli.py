@@ -679,12 +679,14 @@ def _run_ports(args: argparse.Namespace) -> int:
             print(format_local_ports(listeners))
         return 0
     if not args.ip:
-        return _fail_message(
-            args,
-            "ports needs an IP address unless you use `--local`.",
-            "For example: homenet ports 192.168.1.20, or homenet ports --local.",
-            code=2,
-        )
+        # Usage error: same contract as argparse errors (stderr, exit 2).
+        message = "the following arguments are required: ip (or use --local)"
+        hint = "For example: homenet ports 192.168.1.20, or homenet ports --local."
+        if getattr(args, "json", False):
+            print(format_error_json(message, hint), file=sys.stderr)
+        else:
+            print(f"homenet ports: error: {message}\nFix: {hint}", file=sys.stderr)
+        raise SystemExit(2)
     _begin_scan(args)
     target, code = _one_ipv4(args)
     if target is None:
@@ -1493,7 +1495,9 @@ def _explain_params(
     if name in _SCAN_COMMANDS:
         return {"local_network": network}
     if name == "ports":
-        return {"target": ip, "local_network": network, "top_ports": 100, "local": local}
+        if local:
+            return {"local": True}
+        return {"target": ip, "local_network": network, "top_ports": 100}
     if name == "services":
         return {
             "target": ip,

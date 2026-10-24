@@ -82,7 +82,9 @@ def scan_local_ports(
     execute = run or (lambda cmd: run_command(cmd, LOCAL_PORT_TIMEOUT))
     listeners: list[Listener] = []
     try:
-        for command, protocol in zip(build_local_ports_commands(ss_path), ("tcp", "udp")):
+        for command, protocol in zip(
+            build_local_ports_commands(ss_path), ("tcp", "udp"), strict=True
+        ):
             result = execute(command)
             if result.returncode:
                 detail = (result.stderr or "").strip()
