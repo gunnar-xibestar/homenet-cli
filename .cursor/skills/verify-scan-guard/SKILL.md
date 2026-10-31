@@ -52,7 +52,7 @@ Not executed: every other host address inside a /16, every public prefix shorter
 
 ## When the code and this check disagree
 
-The check covers `validate_target` in `src/homenet/core/runner.py`. It was last confirmed against commit `SYNC_COMMIT`.
+The check covers `validate_target` in `src/homenet/core/runner.py`. It was last confirmed against commit `283183de26e39050a80c8f47cd29a0e22a415a8a`.
 
 If `runner.py` changed after that commit, read `validate_target` again before trusting a pass. Move `SYNC_COMMIT` forward only after the script still describes the function at the new commit: same refusal order (parse, IPv4, inside the five ranges, then the /16 floor, then the local subnet unless `force`), and the promise ranges still match `_ALLOWED_RANGES` and `MAX_PREFIX_LEN`.
 
