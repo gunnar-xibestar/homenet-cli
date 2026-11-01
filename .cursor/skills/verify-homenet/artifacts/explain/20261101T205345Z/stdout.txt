@@ -1,0 +1,9 @@
+·
+·
+$ /workspace/.cursor/skills/verify-homenet/sentinel/nmap -sn -T4 -oX - 192.168.1.0/24
+  find devices that are up (ping sweep)
+·
+·
+·
+·
+·

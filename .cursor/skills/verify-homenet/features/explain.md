@@ -30,4 +30,4 @@ Preconditions:
 - `homenet explain devices` without `--network` may run `ip` to find the home network. That entry point is a different proof. Do not use it as proof of the `--network` path.
 - The printed nmap path is whatever `PATH` finds. Under this harness that is the sentinel. The flags and the target are the proof, not a bare `nmap` with no directory.
 - `homenet devices --show-cmd` still scans. It is not explain.
-- A public `--network` such as `8.8.8.0/24` is still printed by explain. Explain does not apply the scan guard. Refusing a public target is [Refuse a public port scan](./refuse-public.md), not this feature.
+- A public `--network` such as `8.8.8.0/24` is refused. Explain plans the sweep through the same scan guard as a real run, so it exits 1, names that network, and does not print an nmap line. `nmap.log` stays empty.

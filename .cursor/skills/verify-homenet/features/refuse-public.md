@@ -19,12 +19,12 @@ Preconditions:
 - `homenet-drive doctor` is ready.
 - The scratch home has no saved baseline. The drive's fresh `HOME` provides that.
 
-- **Plain refusal.** Run `homenet-drive run --feature refuse-public -- ports 8.8.8.8`. Exit 1. stdout contains `Only scan networks you own or have permission to scan.` and `8.8.8.8`. The refusal is one of `outside your local subnet`, `not a private home-network range`, or `Could not detect your local network.` stdout also contains `Fix:`. `nmap.log` is empty. The scratch data directory is gone after the drive returns, which is the absence of a baseline file.
+- **Plain refusal.** Run `homenet-drive run --feature refuse-public -- ports 8.8.8.8`. Exit 1. stdout contains `Only scan networks you own or have permission to scan.` and `Fix:`. When this computer has a local subnet, the refusal contains `8.8.8.8` and `outside your local subnet`. When no local subnet can be detected, the refusal is `Could not detect your local network.` and does not name `8.8.8.8`. `nmap.log` is empty. The scratch data directory is gone after the drive returns, which is the absence of a baseline file.
 - **JSON refusal.** Run `homenet-drive run --feature refuse-public -- ports 8.8.8.8 --json`. Exit 1. stdout is empty or only whitespace. stderr is one JSON object with `error` and `fix_hint`. The error names `8.8.8.8` or the missing local network. There is no safety banner. `nmap.log` is empty.
 
 ## Gotchas
 
 - `homenet device 8.8.8.8` sweeps the detected home network and then looks for that address. It is not this refusal. Do not drive it here.
-- `homenet explain ports 8.8.8.8 --network 192.168.1.0/24` prints a plan. It does not prove the scan was refused.
-- Which refusal sentence appears depends on whether this machine has a default route. All three sentences above are refusals that happen before nmap. An empty `nmap.log` is required for every one of them.
+- `homenet explain ports 8.8.8.8 --network 192.168.1.0/24` does not print a plan. The address is outside that network, so explain exits 1 and says `outside your local subnet`. That is still not this live `ports` command.
+- `ports` refuses in `resolve_local_target` before the scan guard's "not a private home-network range" sentence. You will not see that sentence from `homenet ports 8.8.8.8`. An empty `nmap.log` is required either way.
 - Exit 99 with a scan line in `nmap.log` means the guard did not hold. That is a failed proof, not a pass.

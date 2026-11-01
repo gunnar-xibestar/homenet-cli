@@ -1,0 +1,2 @@
+8.8.8.0/24 is not a private home-network range; scanning it is refused.
+Fix: Only 10.x, 172.16-31.x, 192.168.x (and link-local/loopback) can be scanned.

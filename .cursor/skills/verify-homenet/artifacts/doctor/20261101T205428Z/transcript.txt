@@ -1,0 +1,33 @@
+$ /workspace/.cursor/skills/verify-homenet/.venv/bin/homenet doctor
+exit 1
+--- stdout ---
+·
+·
+Home network doctor
+
+PASS  nmap         nmap 0.0.0 at /workspace/.cursor/skills/verify-homenet/sentinel/nmap
+FAIL  ip           ip is not installed (not found on PATH).
+      Fix: sudo apt install iproute2
+WARN  privileges   running as a normal user: scans work, but MAC addresses/vendors and SYN scans need extra privileges
+      Fix: To see MAC addresses and makers, run `sudo /workspace/.cursor/skills/verify-homenet/.venv/bin/homenet devices`. homenet doctor does not need sudo.
+PASS  network      default route via interface enp0s3 (up)
+WARN  ping         gateway 172.30.0.1 did not answer (100% packet loss)
+      Fix: Check your Wi-Fi/cable; some routers ignore ping, so this may be harmless.
+WARN  nmcli        nmcli is not installed (not found on PATH).
+      Fix: sudo apt install network-manager
+WARN  iw           iw is not installed (not found on PATH).
+      Fix: sudo apt install iw
+WARN  resolvectl   resolvectl is not installed (not found on PATH).
+      Fix: sudo apt install systemd-resolved
+
+1 check failed. 5 warnings.
+·
+·
+·
+·
+·
+
+--- stderr ---
+
+--- nmap log ---
+--version
