@@ -31,7 +31,7 @@ wsl --shutdown
 
 Run `homenet whoami-net`. The address should now be on your home LAN, and the warning should be gone.
 
-The same notes are on the [WSL 2](wsl.md) page.
+Install homenet inside the Ubuntu (WSL) shell, not from Windows. The password prompt comes from sudo itself, not from homenet. Install steps are in [Install](install.md#wsl-2). The same notes are on the [WSL 2](wsl.md) page.
 
 ## See also
 
