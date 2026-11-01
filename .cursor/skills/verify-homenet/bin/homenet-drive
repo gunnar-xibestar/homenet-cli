@@ -72,9 +72,9 @@ def setup() -> int:
         shutil.rmtree(VENV)
     import subprocess
 
-    subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+    subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)  # noqa: S603
     pip = VENV / "bin" / "pip"
-    subprocess.run([str(pip), "install", "-e", str(REPO)], check=True)
+    subprocess.run([str(pip), "install", "-e", str(REPO)], check=True)  # noqa: S603
     ensure_sentinel()
     print(f"installed {homenet_bin()} from {REPO}")
     return 0
@@ -83,14 +83,22 @@ def setup() -> int:
 def doctor() -> int:
     binary = homenet_bin()
     if not binary.is_file():
-        print("homenet is not installed in the verification venv. Run: homenet-drive setup", file=sys.stderr)
+        print(
+            "homenet is not installed in the verification venv. Run: homenet-drive setup",
+            file=sys.stderr,
+        )
         return 1
     env = os.environ.copy()
     env["PATH"] = f"{VENV / 'bin'}:{env.get('PATH', '')}"
     env["VIRTUAL_ENV"] = str(VENV)
     import subprocess
 
-    proc = subprocess.run([str(binary), "--version"], capture_output=True, text=True, env=env)
+    proc = subprocess.run(  # noqa: S603
+        [str(binary), "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     version = pyproject_version()
     text = (proc.stdout or "") + (proc.stderr or "")
     resolved = binary.resolve()
@@ -142,7 +150,7 @@ def run_pty(argv: list[str], env: dict[str, str], cwd: Path) -> tuple[int, bytes
             os.close(err_r)
             os.close(err_w)
             os.chdir(cwd)
-            os.execvpe(argv[0], argv, env)
+            os.execvpe(argv[0], argv, env)  # noqa: S606
         except OSError as exc:
             os.write(2, f"{exc}\n".encode())
             os._exit(127)
@@ -179,7 +187,7 @@ def drive(feature: str, homenet_args: list[str]) -> int:
         return 1
     ensure_sentinel()
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    scratch = Path(f"/tmp/homenet-verify-{feature}-{run_id}-{os.getpid()}")
+    scratch = Path(f"/tmp/homenet-verify-{feature}-{run_id}-{os.getpid()}")  # noqa: S108
     home = scratch / "home"
     data = scratch / "data"
     config = scratch / "config"
@@ -194,7 +202,9 @@ def drive(feature: str, homenet_args: list[str]) -> int:
     env["XDG_DATA_HOME"] = str(data)
     env["XDG_CONFIG_HOME"] = str(config)
     env["XDG_CACHE_HOME"] = str(scratch / "cache")
-    env["PATH"] = f"{SENTINEL_DIR}:{VENV / 'bin'}:/usr/bin:/bin"
+    # Keep the caller's PATH so ip and ping stay visible. The sentinel stays first,
+    # so the name nmap still resolves to it.
+    env["PATH"] = f"{SENTINEL_DIR}:{VENV / 'bin'}:{env.get('PATH', '/usr/bin:/bin')}"
     env["VIRTUAL_ENV"] = str(VENV)
     env["HOMENET_VERIFY_NMAP_LOG"] = str(nmap_log)
     env.pop("PYTHONPATH", None)
@@ -238,7 +248,7 @@ def cleanup() -> int:
         if not any(STATE_DIR.iterdir()):
             STATE_DIR.rmdir()
     removed = []
-    tmp = Path("/tmp")
+    tmp = Path("/tmp")  # noqa: S108
     for path in tmp.glob("homenet-verify-*"):
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)

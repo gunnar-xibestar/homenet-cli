@@ -40,7 +40,7 @@ It is read-only. It checks that `.venv/bin/homenet` exists, resolves inside that
 The helper (`bin/homenet-drive`) does all of the following:
 
 - Sets `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME` under `/tmp/homenet-verify-<feature>-<time>-<pid>`.
-- Puts `.cursor/skills/verify-homenet/sentinel` first on `PATH`, then the venv, then `/usr/bin:/bin`. The sentinel binary is named `nmap`. It appends its arguments to the drive's nmap log. `--version` and any non-scan probe print `Nmap version 0.0.0 (homenet verification sentinel)` and exit 0. Scan arguments (`-sn`, `-sT`, `-sS`, `-sV`, `-oX`, `--top-ports`, `-p`, `-p-`, `-A`, `-O`, `--script`) exit 99 and do not scan.
+- Puts `.cursor/skills/verify-homenet/sentinel` first on `PATH`, then the venv, then the `PATH` already in the environment, so `ip` and `ping` stay findable. The sentinel binary is named `nmap`. It appends its arguments to the drive's nmap log. `--version` and any non-scan probe print `Nmap version 0.0.0 (homenet verification sentinel)` and exit 0. Scan arguments (`-sn`, `-sT`, `-sS`, `-sV`, `-oX`, `--top-ports`, `-p`, `-p-`, `-A`, `-O`, `--script`) exit 99 and do not scan.
 - Runs `homenet` with stdout on a PTY and stderr on a pipe.
 - Writes the proof under `.cursor/skills/verify-homenet/artifacts/<feature>/<run-id>/`.
 

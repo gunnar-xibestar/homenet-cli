@@ -1,0 +1,1 @@
+/workspace/.cursor/skills/verify-homenet/.venv/bin/homenet whoami-net
