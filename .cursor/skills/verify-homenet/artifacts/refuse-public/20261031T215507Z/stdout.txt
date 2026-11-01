@@ -1,0 +1,6 @@
+·
+·
+Only scan networks you own or have permission to scan.
+
+Could not detect your local network.
+Fix: Check you are connected (see `homenet whoami-net`).
