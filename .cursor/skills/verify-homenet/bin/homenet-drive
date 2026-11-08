@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Drive the homenet CLI for verification.
+
+Isolated home and data directories, a PTY for stdout, and a sentinel nmap
+that records every invocation and refuses scan arguments.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import pty
+import select
+import shutil
+import signal
+import sys
+import termios
+import time
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+REPO = SKILL_DIR.parents[2]
+VENV = SKILL_DIR / ".venv"
+ARTIFACTS = SKILL_DIR / "artifacts"
+STATE_DIR = SKILL_DIR / "run-state"
+SENTINEL_DIR = SKILL_DIR / "sentinel"
+SCAN_FLAGS = ("-sn", "-sT", "-sS", "-sV", "-oX", "--top-ports", "-p-", "-A", "-O")
+
+
+def homenet_bin() -> Path:
+    return VENV / "bin" / "homenet"
+
+
+def pyproject_version() -> str:
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("version"):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit("pyproject.toml has no version")
+
+
+def ensure_sentinel() -> None:
+    SENTINEL_DIR.mkdir(parents=True, exist_ok=True)
+    path = SENTINEL_DIR / "nmap"
+    path.write_text(
+        """#!/bin/sh
+log=${HOMENET_VERIFY_NMAP_LOG:?}
+printf '%s\\n' "$*" >> "$log"
+for arg in "$@"; do
+  case $arg in
+    -sn|-sT|-sS|-sV|-oX|--top-ports|-p-|-A|-O|--script|-p)
+      echo "verification sentinel refused an nmap scan: $*" >&2
+      exit 99
+      ;;
+  esac
+done
+echo "Nmap version 0.0.0 (homenet verification sentinel)"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def setup() -> int:
+    if not (REPO / "pyproject.toml").is_file():
+        print(f"repo root not found from {SKILL_DIR}", file=sys.stderr)
+        return 1
+    if VENV.exists():
+        shutil.rmtree(VENV)
+    import subprocess
+
+    subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)  # noqa: S603
+    pip = VENV / "bin" / "pip"
+    subprocess.run([str(pip), "install", "-e", str(REPO)], check=True)  # noqa: S603
+    ensure_sentinel()
+    print(f"installed {homenet_bin()} from {REPO}")
+    return 0
+
+
+def doctor() -> int:
+    binary = homenet_bin()
+    if not binary.is_file():
+        print(
+            "homenet is not installed in the verification venv. Run: homenet-drive setup",
+            file=sys.stderr,
+        )
+        return 1
+    env = os.environ.copy()
+    env["PATH"] = f"{VENV / 'bin'}:{env.get('PATH', '')}"
+    env["VIRTUAL_ENV"] = str(VENV)
+    import subprocess
+
+    proc = subprocess.run(  # noqa: S603
+        [str(binary), "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    version = pyproject_version()
+    text = (proc.stdout or "") + (proc.stderr or "")
+    resolved = binary.resolve()
+    try:
+        resolved.relative_to(VENV.resolve())
+        inside = True
+    except ValueError:
+        inside = False
+    problems = []
+    if proc.returncode != 0:
+        problems.append(f"--version exited {proc.returncode}: {text.strip()}")
+    if f"homenet {version}" not in text:
+        problems.append(f"version output {text!r} does not contain homenet {version}")
+    if not inside:
+        problems.append(f"{resolved} is outside {VENV}")
+    if problems:
+        print("verify-homenet doctor: not ready", file=sys.stderr)
+        for item in problems:
+            print(f"- {item}", file=sys.stderr)
+        return 1
+    print(f"verify-homenet doctor: ready ({text.strip()} at {resolved})")
+    return 0
+
+
+def _read_ready(fd: int, chunks: list[bytes]) -> bool:
+    try:
+        data = os.read(fd, 65536)
+    except OSError:
+        return True
+    if not data:
+        return True
+    chunks.append(data)
+    return False
+
+
+def run_pty(argv: list[str], env: dict[str, str], cwd: Path) -> tuple[int, bytes, bytes]:
+    master, slave = pty.openpty()
+    err_r, err_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(err_w, 2)
+            os.close(master)
+            os.close(slave)
+            os.close(err_r)
+            os.close(err_w)
+            os.chdir(cwd)
+            os.execvpe(argv[0], argv, env)  # noqa: S606
+        except OSError as exc:
+            os.write(2, f"{exc}\n".encode())
+            os._exit(127)
+    os.close(slave)
+    os.close(err_w)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / f"{pid}.json").write_text(
+        json.dumps({"pid": pid, "argv": argv, "started": time.time()}),
+        encoding="utf-8",
+    )
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    open_fds = {master, err_r}
+    while open_fds:
+        readable, _, _ = select.select(list(open_fds), [], [], 30)
+        if not readable:
+            os.kill(pid, signal.SIGKILL)
+            break
+        for fd in readable:
+            done = _read_ready(fd, out_chunks if fd == master else err_chunks)
+            if done:
+                open_fds.discard(fd)
+                os.close(fd)
+    _pid, status = os.waitpid(pid, 0)
+    state = STATE_DIR / f"{pid}.json"
+    if state.exists():
+        state.unlink()
+    code = os.waitstatus_to_exitcode(status)
+    return code, b"".join(out_chunks), b"".join(err_chunks)
+
+
+def drive(feature: str, homenet_args: list[str]) -> int:
+    if doctor() != 0:
+        return 1
+    ensure_sentinel()
+    run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    scratch = Path(f"/tmp/homenet-verify-{feature}-{run_id}-{os.getpid()}")  # noqa: S108
+    home = scratch / "home"
+    data = scratch / "data"
+    config = scratch / "config"
+    for path in (home, data, config):
+        path.mkdir(parents=True)
+    nmap_log = scratch / "nmap.log"
+    nmap_log.write_text("", encoding="utf-8")
+    artifact = ARTIFACTS / feature / run_id
+    artifact.mkdir(parents=True)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_DATA_HOME"] = str(data)
+    env["XDG_CONFIG_HOME"] = str(config)
+    env["XDG_CACHE_HOME"] = str(scratch / "cache")
+    # Keep the caller's PATH so ip and ping stay visible. The sentinel stays first,
+    # so the name nmap still resolves to it.
+    env["PATH"] = f"{SENTINEL_DIR}:{VENV / 'bin'}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["VIRTUAL_ENV"] = str(VENV)
+    env["HOMENET_VERIFY_NMAP_LOG"] = str(nmap_log)
+    env.pop("PYTHONPATH", None)
+    argv = [str(homenet_bin()), *homenet_args]
+    code, stdout, stderr = run_pty(argv, env, REPO)
+    (artifact / "command.txt").write_text(" ".join(argv) + "\n", encoding="utf-8")
+    (artifact / "stdout.txt").write_bytes(stdout)
+    (artifact / "stderr.txt").write_bytes(stderr)
+    (artifact / "exit_code.txt").write_text(f"{code}\n", encoding="utf-8")
+    (artifact / "nmap.log").write_text(nmap_log.read_text(encoding="utf-8"), encoding="utf-8")
+    (artifact / "scratch-home.txt").write_text(str(home) + "\n", encoding="utf-8")
+    transcript = (
+        f"$ {' '.join(argv)}\n"
+        f"exit {code}\n"
+        f"--- stdout ---\n{stdout.decode(errors='replace')}\n"
+        f"--- stderr ---\n{stderr.decode(errors='replace')}\n"
+        f"--- nmap log ---\n{nmap_log.read_text(encoding='utf-8')}"
+    )
+    (artifact / "transcript.txt").write_text(transcript, encoding="utf-8")
+    print(transcript, end="" if transcript.endswith("\n") else "\n")
+    print(f"artifacts: {artifact}")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return 0
+
+
+def cleanup() -> int:
+    killed = []
+    if STATE_DIR.is_dir():
+        for path in STATE_DIR.glob("*.json"):
+            try:
+                pid = json.loads(path.read_text(encoding="utf-8"))["pid"]
+            except (OSError, json.JSONDecodeError, KeyError):
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except ProcessLookupError:
+                pass
+            path.unlink(missing_ok=True)
+        if not any(STATE_DIR.iterdir()):
+            STATE_DIR.rmdir()
+    removed = []
+    tmp = Path("/tmp")  # noqa: S108
+    for path in tmp.glob("homenet-verify-*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+    print(f"cleanup killed {killed or 'no live drives'}; removed {removed or 'no scratch dirs'}")
+    print(f"artifacts kept at {ARTIFACTS}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="homenet-drive")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("setup")
+    sub.add_parser("doctor")
+    sub.add_parser("cleanup")
+    run = sub.add_parser("run")
+    run.add_argument("--feature", required=True)
+    run.add_argument("homenet_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    if args.command == "setup":
+        return setup()
+    if args.command == "doctor":
+        return doctor()
+    if args.command == "cleanup":
+        return cleanup()
+    homenet_args = args.homenet_args
+    if homenet_args and homenet_args[0] == "--":
+        homenet_args = homenet_args[1:]
+    if not homenet_args:
+        print("run needs the homenet arguments after --", file=sys.stderr)
+        return 2
+    return drive(args.feature, homenet_args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
