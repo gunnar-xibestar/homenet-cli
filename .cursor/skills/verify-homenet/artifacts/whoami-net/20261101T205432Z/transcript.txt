@@ -1,0 +1,28 @@
+$ /workspace/.cursor/skills/verify-homenet/.venv/bin/homenet whoami-net
+exit 0
+--- stdout ---
+·
+·
+This computer on your home network
+
+Interface     enp0s3
+IP address    not available
+Gateway       172.30.0.1
+Home network  172.30.0.0/24
+Network size  /24 (256 addresses: 172.30.0.0–172.30.0.255)
+
+The interface is how this computer is connected, such as Wi-Fi.
+The IP address is this computer.
+The gateway is usually your home router.
+The home network is the group of addresses your devices share.
+
+This computer's own IP address was not available.
+·
+·
+·
+·
+·
+
+--- stderr ---
+
+--- nmap log ---
